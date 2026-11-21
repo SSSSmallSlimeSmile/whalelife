@@ -123,13 +123,15 @@ export function renderBindings(app) {
   const sessionSettings = `<section class="panel panel-body" style="margin-bottom:22px"><h2>当前会话</h2><p>正在使用：<strong>${e(sessionName(app.state))}</strong> <small>${e(app.state.session)}</small></p><div class="row context-session-select"><label for="active-session">切换到</label><select id="active-session" ${app.state.chatBusy ? "disabled" : ""}>${sessions.map(item => `<option value="${e(item.id)}" ${item.id === app.state.session ? "selected" : ""}>${e(item.name || item.id)}${item.id === app.state.session ? "（正在使用）" : ""}</option>`).join("")}</select><button id="apply-session" class="btn primary small" type="button" disabled>切换会话</button><button id="new-session" class="btn small" type="button" ${app.state.chatBusy ? "disabled" : ""}>${icon("plus")}新建并使用</button></div><p class="hint">选好后点击“切换会话”才生效。网页和跟随当前会话的插件共用此选择，正在处理的请求仍留在原会话。浏览记忆档案不会切换这里。</p><p id="session-switch-error" class="form-error" role="alert"></p></section>`;
   const activePersona = c.activePersona || app.state.status?.persona || "";
   const personaSettings = `<label class="form-field"><span>当前聊天人格</span><select id="active-persona" name="activePersona" required ${app.state.chatBusy || !c.personas.length ? "disabled" : ""}>${!activePersona ? '<option value="">请选择人格</option>' : ""}${c.personas.map((p) => `<option value="${e(p.id)}" ${p.id === activePersona ? "selected" : ""}>${e(p.name)}</option>`).join("")}</select></label><p id="active-persona-routing" class="hint" style="margin-top:16px">${e(personaRoutingText(c, activePersona))}</p><p class="hint" style="margin-top:12px">与模型选择一起保存后生效。切换人格保持当前会话和聊天记录；请等待当前回复结束后切换。</p><a href="#personas" class="btn tonal" style="margin-top:18px">编辑人格 ${icon("arrow")}</a>`;
-  const options = (type, selected, inherit = false) =>
-    `<option value="">${inherit ? "使用工作空间的对话模型" : "未配置"}</option>` +
+  const options = (type, selected, inherit = false) => {
+    // 日记整理借用对话模型那一类；模型本身没有 type=diary。
+    const kind = type === "diary" ? "chat" : type;
+    return `<option value="">${inherit ? "使用工作空间的对话模型" : "未配置"}</option>` +
     c.models
       .filter(
         (m) =>
-          m.type === type &&
-          (type !== "chat" || coreChatModel(c, m)) &&
+          m.type === kind &&
+          (kind !== "chat" || coreChatModel(c, m)) &&
           m.enabled &&
           !m.configuration_error &&
           c.providers.find((p) => p.id === m.provider)?.enabled,
@@ -139,9 +141,10 @@ export function renderBindings(app) {
           `<option value="${e(m.id)}" ${m.id === selected ? "selected" : ""}>${e(m.name)} · ${e(c.providers.find((p) => p.id === m.provider)?.name || m.provider)}</option>`,
       )
       .join("");
+  };
   const field = (type, description) =>
     `<div class="binding-row"><div class="row">${icon(typeIcon(type))}<h3>${typeNames[type]}模型</h3></div><select name="binding_${type}" aria-label="${typeNames[type]}模型">${options(type, c.bindings[type])}</select><p>${description}</p></div>`;
-  return `<div class="page-heading"><div><div class="eyebrow">MODEL ROUTING</div><h1>使用配置</h1><p>明确选择每种能力使用的模型。未配置的用途保持关闭。</p></div><div class="heading-actions"><button type="submit" form="bindings-form" class="btn primary" id="save-bindings">${icon("check")}保存配置</button></div></div><div class="info-banner">${icon("info")}选择已启用的模型，保存后从下一次请求开始生效。</div>${sessionSettings}<form id="bindings-form"><div class="bindings-grid"><section class="panel"><div class="panel-header"><h2>工作空间模型</h2><a href="#models" class="btn small link">管理模型 ${icon("arrow")}</a></div><div class="panel-body">${field("chat", "用于鲸鲸的日常对话和会话摘要。")}${field("embedding", "供插件使用的向量模型。当前支持配置与接口测试；检索由插件实现。")}${field("rerank", "供重排序插件使用的模型选择，可留空。")}<details style="margin-top:20px"><summary class="muted">更多模型用途</summary><div style="margin-top:20px">${field("image", "图像生成服务的模型选择。")}${field("stt", "语音识别服务的模型选择。")}${field("tts", "语音合成服务的模型选择。")}<p class="hint" style="margin-top:16px">这里保存模型选择，图像、语音与重排序的具体调用由对应插件实现。</p></div></details></div></section><section class="panel"><div class="panel-header"><h2>人格配置</h2></div><div class="panel-body">${personaSettings}${timeSettings}</div></section></div><p id="bindings-error" class="form-error" role="alert"></p></form>`;
+  return `<div class="page-heading"><div><div class="eyebrow">MODEL ROUTING</div><h1>使用配置</h1><p>明确选择每种能力使用的模型。未配置的用途保持关闭。</p></div><div class="heading-actions"><button type="submit" form="bindings-form" class="btn primary" id="save-bindings">${icon("check")}保存配置</button></div></div><div class="info-banner">${icon("info")}选择已启用的模型，保存后从下一次请求开始生效。</div>${sessionSettings}<form id="bindings-form"><div class="bindings-grid"><section class="panel"><div class="panel-header"><h2>工作空间模型</h2><a href="#models" class="btn small link">管理模型 ${icon("arrow")}</a></div><div class="panel-body">${field("chat", "用于鲸鲸的日常对话和会话摘要。")}${field("diary", "日记整理单独使用的模型。留空则沿用对话模型。")}${field("embedding", "供插件使用的向量模型。当前支持配置与接口测试；检索由插件实现。")}${field("rerank", "供重排序插件使用的模型选择，可留空。")}<details style="margin-top:20px"><summary class="muted">更多模型用途</summary><div style="margin-top:20px">${field("image", "图像生成服务的模型选择。")}${field("stt", "语音识别服务的模型选择。")}${field("tts", "语音合成服务的模型选择。")}<p class="hint" style="margin-top:16px">这里保存模型选择，图像、语音与重排序的具体调用由对应插件实现。</p></div></details></div></section><section class="panel"><div class="panel-header"><h2>人格配置</h2></div><div class="panel-body">${personaSettings}${timeSettings}</div></section></div><p id="bindings-error" class="form-error" role="alert"></p></form>`;
 }
 export function bindBindings(app) {
   app.bindingsDirty = false;
@@ -187,7 +190,7 @@ export function bindBindings(app) {
     button.disabled = true;
     const next = app.configDraft();
     if (selectedPersona) next.activePersona = selectedPersona;
-    for (const key of ["chat", "embedding", "rerank", "image", "stt", "tts"])
+    for (const key of ["chat", "diary", "embedding", "rerank", "image", "stt", "tts"])
       next.bindings[key] = data.get("binding_" + key) || null;
     try {
       await app.saveConfig(next);
@@ -218,7 +221,8 @@ export function bindPlugins(app) {
 export function renderChat(app) {
   const model = activeChat(app);
   const personaName = app.state.status.personaName || "助手";
-  return `<div class="page-heading"><div><div class="eyebrow">PLAYGROUND</div><h1>和${e(personaName)}聊聊</h1><p>测试当前人格的回复，也可以要求记下一条事实。</p></div><div class="heading-actions"><a class="btn" href="#bindings">当前会话：${e(sessionName(app.state))} ${icon("sliders")}</a></div></div><section class="panel chat-panel"><div class="chat-header"><span class="avatar">${e(personaName.slice(0, 1))}</span><div><h3>${e(app.state.status.personaName || "鲸鲸")}</h3><small>${e(model?.name || "请先选择对话模型")} <span>·</span> ${e(app.state.status.persona)}</small></div><div class="spacer"></div><a href="#bindings" class="btn small link">更换模型 ${icon("sliders")}</a></div><div id="chat-context">${renderContextMeter(app.state.sessionContext, true)}</div><div id="messages" class="messages" aria-live="polite"></div><form id="chat-form" class="composer"><textarea id="chat-input" aria-label="聊天消息" placeholder="和${e(personaName)}说点什么…" rows="2"></textarea><div class="composer-footer"><small>Enter 发送 · Shift + Enter 换行</small><button id="send" class="btn primary small" type="submit" ${app.state.chatBusy || !app.chatConnected || !model ? "disabled" : ""}>${app.state.chatBusy ? "正在回复…" : "发送"} ${icon("send")}</button></div></form></section>`;
+  return `<div class="page-heading"><div><div class="eyebrow">PLAYGROUND</div><h1>和${e(personaName)}聊聊</h1><p>测试当前人格的回复，也可以要求记下一条事实。</p></div><div class="heading-actions"><a class="btn" href="#bindings">当前会话：${e(sessionName(app.state))} ${icon("sliders")}</a><button type="button" class="btn icon-only" id="rename-session" title="给当前会话改名" aria-label="给当前会话改名">${icon("edit")}</button></div></div><section class="panel chat-panel"><div class="chat-header"><span class="avatar">${e(personaName.slice(0, 1))}</span><div><h3>${e(app.state.status.personaName || "鲸鲸")}</h3><small>${e(model?.name || "请先选择对话模型")} <span>·</span> ${e(app.state.status.persona)}</small></div><div class="spacer"></div><a href="#bindings" class="btn small link">更换模型 ${icon("sliders")}</a></div><div id="chat-context">${renderContextMeter(app.state.sessionContext, true)}</div><div class="chat-body"><aside id="chat-rail" class="chat-rail" hidden></aside><div id="messages" class="messages" aria-live="polite"></div></div><form id="chat-form" class="composer"><textarea id="chat-input" aria-label="聊天消息" placeholder="和${e(personaName)}说点什么…" rows="2"></textarea><div id="composer-images" class="composer-images" hidden></div>
+<div class="composer-footer"><small>Enter 发送 · Shift + Enter 换行</small><label class="btn small attach" title="添加图片（也可直接粘贴或拖进来）">图片<input id="image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label><button id="send" class="btn primary small" type="submit" ${app.state.chatBusy || !app.chatConnected || !model ? "disabled" : ""}>${app.state.chatBusy ? "正在回复…" : "发送"} ${icon("send")}</button></div></form></section>`;
 }
 export function bindChat(app) {
   app.refreshSessionContext();
@@ -226,6 +230,9 @@ export function bindChat(app) {
   const input = document.querySelector("#chat-input");
   input.value = app.state.chatDraft || "";
   input.oninput = () => (app.state.chatDraft = input.value);
+  app.bindImageComposer();
+  const renameBtn = document.querySelector("#rename-session");
+  if (renameBtn) renameBtn.onclick = () => app.renameSession();
   input.onkeydown = (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

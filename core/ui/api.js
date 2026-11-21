@@ -33,6 +33,7 @@ export const escapeHTML = (value) =>
   );
 export const typeNames = {
   chat: "对话",
+  diary: "日记整理",
   embedding: "向量 / Embedding",
   rerank: "重排序",
   image: "图像生成",

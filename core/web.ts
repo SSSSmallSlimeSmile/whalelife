@@ -3,6 +3,9 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { resolve as resolvePath, sep as pathSep } from "node:path";
 import { clock } from "./time.ts";
 import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -476,7 +479,24 @@ export async function startWeb(config: any, services: any, runtime: any) {
       if (req.method === "GET" && req.url?.startsWith("/api/session?")) {
         const id = new URL(req.url, origin).searchParams.get("id");
         if (!id) return send(400, { error: "请提供会话 ID" });
-        return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        const rows = conversationRows(await memory.readSession(id)).filter(
+          (row: any) => row.type === "message",
+        );
+        const paging = new URL(req.url, origin).searchParams;
+        const limit = Math.min(Math.max(Number(paging.get("limit") || 40) || 40, 1), 200);
+        const beforeRaw = paging.get("before");
+        const end =
+          beforeRaw === null || beforeRaw === ""
+            ? rows.length
+            : Math.min(Math.max(Number(beforeRaw) || 0, 0), rows.length);
+        const start = Math.max(0, end - limit);
+        return send(200, {
+          items: rows.slice(start, end),
+          total: rows.length,
+          start,
+          end,
+          hasMore: start > 0,
+        });
       }
       if (req.method === "GET" && req.url === "/api/status")
         return send(200, {
@@ -496,6 +516,90 @@ export async function startWeb(config: any, services: any, runtime: any) {
           pluginPages: routes.pages(),
           diagnostics: services.diagnostics?.status(),
         });
+      if (req.method === "POST" && req.url === "/api/clipboard-image") {
+        // Paste fallback: Chromium often cannot decode a WeChat screenshot that
+        // arrives as a bare DIB. Ask Windows for the bitmap and hand back a PNG.
+        const script = fileURLToPath(
+          new URL("./clipboard-image.ps1", import.meta.url),
+        );
+        const text = await new Promise<string>((done, fail) => {
+          execFile(
+            "powershell",
+            ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", script],
+            { timeout: 15000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+            (error: any, stdout: string) => {
+              if (error && !stdout) return fail(error);
+              done(String(stdout ?? "").trim());
+            },
+          );
+        });
+        if (text === "NOIMAGE")
+          return send(409, { error: "系统剪贴板里没有图片" });
+        if (!text || text.startsWith("ERROR:"))
+          return send(500, { error: "读取系统剪贴板失败" });
+        return send(200, { dataUrl: "data:image/png;base64," + text });
+      }
+      if (req.method === "GET" && memoryUrl.pathname === "/api/media") {
+        const raw = memoryUrl.searchParams.get("path") ?? "";
+        if (!raw) return send(400, { error: "缺少 path" });
+        const target = resolvePath(raw);
+        const roots = [
+          resolvePath("memory"),
+          resolvePath("plugins"),
+          ...((config.web?.media_roots ?? []) as string[]).map((x) => resolvePath(x)),
+        ];
+        const allowed = roots.some((r) => target === r || target.startsWith(r + pathSep));
+        if (!allowed) return send(403, { error: "路径不在允许范围" });
+        const ext = target.slice(target.lastIndexOf(".")).toLowerCase();
+        const types: Record<string, string> = {
+          ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+          ".gif": "image/gif", ".webp": "image/webp",
+          ".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+        };
+        const type = types[ext];
+        if (!type) return send(415, { error: "不支持的文件类型" });
+        try {
+          const buf = await readFile(target);
+          res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+          res.end(buf);
+        } catch {
+          send(404, { error: "文件不存在" });
+        }
+        return;
+      }
+
+      if (req.method === "GET" && memoryUrl.pathname === "/api/file") {
+        // 回复末尾「本轮文件」的打开入口：只读工作目录里的普通文件，隐藏目录和密钥文件一律不给。
+        const raw = memoryUrl.searchParams.get("path") ?? "";
+        if (!raw) return send(400, { error: "缺少 path" });
+        const base = resolvePath(".");
+        const target = resolvePath(raw);
+        if (target !== base && !target.startsWith(base + pathSep))
+          return send(403, { error: "路径不在工作目录内" });
+        const relative = target.slice(base.length).replace(/^[\\/]+/, "").replaceAll("\\", "/");
+        const segments = relative.split("/");
+        if (!relative || segments.some((seg: string) => seg.startsWith(".") || seg === "node_modules"))
+          return send(403, { error: "这个路径不允许打开" });
+        if (/^(config|credentials?|secrets?)\.json$/i.test(segments[segments.length - 1] ?? ""))
+          return send(403, { error: "sensitive config file blocked" });
+        if (/\.(env|key|pem|p12)$/i.test(relative))
+          return send(403, { error: "这个文件不允许打开" });
+        try {
+          const buf = await readFile(target);
+          const text = /\.(md|markdown|patch|diff|txt|ts|tsx|js|mjs|cjs|json|css|html|py|yml|yaml|toml|sh|ps1|log|csv)$/i.test(relative);
+          const name = segments[segments.length - 1] ?? "file";
+          res.writeHead(200, {
+            "Content-Type": text ? "text/plain; charset=utf-8" : "application/octet-stream",
+            "Content-Disposition": (text ? "inline" : "attachment") + "; filename*=UTF-8''" + encodeURIComponent(name),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          });
+          res.end(buf);
+        } catch {
+          send(404, { error: "文件不存在或读不到" });
+        }
+        return;
+      }
       if (req.method === "GET" && req.url === "/api/logs")
         return send(200, logger.lines);
       if (req.method === "POST" && req.url === "/api/plugin") {
