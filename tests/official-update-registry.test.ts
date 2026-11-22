@@ -35,6 +35,19 @@ test("conditional children must be owned by the reviewed release", () => {
     assert.throws(() => targets(invalid), /审核资料无效/);
 });
 
+test("a legacy catalog can reuse conditional child review only on the identical, still-approved release", () => {
+  const row = {...release("1.1.0"), bundledPluginIds:["demo/bridge"]};
+  const known = {...local, verifiedReleases:[{...row, conditionalBundledPluginIds:["demo/bridge"]}]};
+  const targets = (...rows: unknown[]) => officialUpdateEntries({schemaVersion:1,
+    plugins:[{...published, verifiedReleases:rows}]},[known])[0].verifiedReleases.filter(r => !r.recognitionOnly);
+  assert.deepEqual(targets({...row})[0].conditionalBundledPluginIds, ["demo/bridge"]);
+  assert.deepEqual(targets({...row,conditionalBundledPluginIds:[]})[0].conditionalBundledPluginIds, []);
+  assert.deepEqual(targets(), []);
+  for (const change of [{sha256:"d".repeat(64)}, {inventorySha256:"c".repeat(64)}, {hostRange:">=0.1.1"},
+    {bundledPluginIds:[]}, {sizeBytes:2048}, {arch:"arm64"}, {sourceCommit:"d".repeat(40)}])
+    assert.equal(targets({...row,...change})[0].conditionalBundledPluginIds, undefined);
+});
+
 test("current main authorizes official target bytes and the shipped inventory can still identify an old install", () => {
   const resolved = (plugins: unknown[]) => officialUpdateEntries({schemaVersion:1,plugins},[local])[0].verifiedReleases;
   assert.deepEqual(resolved([published]).filter(r=>!r.recognitionOnly).map(r=>r.version),["1.1.0"]);

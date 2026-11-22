@@ -4,6 +4,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import type { PackageEntry, PackageRelease } from "./official-plugins.ts";
 import { parseHostRange } from "./package-host-range.ts";
 import { validPluginId } from "./plugin-state.ts";
@@ -83,8 +84,16 @@ export function officialUpdateEntries(registry: any, known = local.plugins, sign
       throw Error("官方插件归属或依赖清单无效：" + entry.id);
     const releases: PackageRelease[] = [], targets = new Set<string>();
     const seenInventory = new Set<string>();
-    for (const r of remote.verifiedReleases) {
-      if (!r || (!r.recognitionOnly && r.delivery !== "github-release" && r.delivery !== "inventory")) continue;
+    for (const published of remote.verifiedReleases) {
+      if (!published || (!published.recognitionOnly && published.delivery !== "github-release" && published.delivery !== "inventory")) continue;
+      let r = published;
+      // Older catalogs omit conditional registration. Reuse the local review only for
+      // the very same published record. An explicit remote list (including []) wins.
+      if (r.conditionalBundledPluginIds === undefined) {
+        const reviewed = entry.verifiedReleases.find(local => local.conditionalBundledPluginIds?.length &&
+          local.sha256 === r.sha256 && isDeepStrictEqual(local, {...r, conditionalBundledPluginIds: local.conditionalBundledPluginIds}));
+        if (reviewed) r = {...r, conditionalBundledPluginIds: reviewed.conditionalBundledPluginIds};
+      }
       const scope = (entry.parentId ? entry.parentId + "/" : "") + entry.id + "/";
       if (!stableVersion(r.version) || !parseHostRange(r.hostRange) ||
           typeof r.platform !== "string" || !/^[a-z0-9]{1,16}$/.test(r.platform) ||
