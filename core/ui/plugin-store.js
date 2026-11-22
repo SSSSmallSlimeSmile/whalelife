@@ -108,11 +108,13 @@ function detail(state, catalog) {
   const local = officialEntry && bundledIdentity(state, entry);
   const plan = localPlan(state, entry, !!officialEntry);
   const update = storeUpdate(state, entry, officialEntry ? "official" : "community");
+  const hasCommunityPackages = !officialEntry && Array.isArray(entry.verifiedReleases) && entry.verifiedReleases.length > 0;
   const action = update ? `<span class="store-action">${updateButton(state, entry, update)}</span>` : local
     ? `<span class="store-action" data-official-store-slot="${e(entry.id)}">${renderStoreInstall(state, entry.id)}</span>`
-    : plan ? communityAction(state, entry, plan) : externalLink(entry.installation, "安装说明");
+    : plan ? communityAction(state, entry, plan)
+    : hasCommunityPackages ? communityPlanStatus(state) : externalLink(entry.installation, "安装说明");
   const links = [
-    local || plan || update ? externalLink(entry.installation, "安装说明") : "",
+    local || plan || update || hasCommunityPackages ? externalLink(entry.installation, "安装说明") : "",
     externalLink(entry.repository, "原仓库 · 加星"),
     externalLink(entry.feedback, "反馈问题"),
   ].join("");
@@ -126,6 +128,12 @@ function detail(state, catalog) {
       ${updateDetails(update)}
       <div class="store-actions">${action}</div>
       <nav class="store-links" aria-label="${e(entry.name)}相关链接">${links}</nav></div>`;
+}
+
+function communityPlanStatus(state) {
+  if (state.communityPlansFailed) return `<span class="store-action" role="status">安装条件核对失败
+    <button type="button" class="btn small" data-community-plans-retry>重试</button></span>`;
+  return `<span role="status">${state.communityPlugins ? "当前没有可用的安装计划" : "正在核对安装条件…"}</span>`;
 }
 
 function communityAction(state, entry, plan) {
@@ -142,16 +150,25 @@ async function readCommunityPlans(app) {
   if (app.communityRead || app.state.officialBusy) return;
   const read = api("/api/community-plugins");
   app.communityRead = read;
+  const notify = () => app.content.ownerDocument.getElementById("plugin-store")?.dispatchEvent(new Event("community-plans"));
+  if (app.state.communityPlansFailed) {
+    app.state.communityPlansFailed = false;
+    notify();
+  }
   try {
     const { plugins } = await read;
-    if (app.communityRead === read) app.state.communityPlugins = Array.isArray(plugins) ? plugins : null;
+    if (!Array.isArray(plugins)) throw Error("安装计划响应无效");
+    if (app.communityRead === read) app.state.communityPlugins = plugins;
   } catch {
-    if (app.communityRead === read) app.state.communityPlugins = null;
+    if (app.communityRead === read) {
+      app.state.communityPlugins = null;
+      app.state.communityPlansFailed = true;
+    }
   } finally {
     if (app.communityRead === read) {
       app.communityRead = null;
       paintManageIcons(app);
-      app.content.ownerDocument.getElementById("plugin-store")?.dispatchEvent(new Event("community-plans"));
+      notify();
     }
   }
 }
@@ -311,6 +328,7 @@ export function bindStore(app, container = app.content, opening = true) {
           current.repository === update.repository;
       });
     }
+    else if (event.target.closest("[data-community-plans-retry]")) void readCommunityPlans(app);
     else if (event.target.closest("[data-store-retry]")) void loadStoreCatalog(app, catalogChanged);
     else if (install && !install.disabled) {
       const id = install.dataset.communityInstall;
@@ -330,6 +348,6 @@ export function bindStore(app, container = app.content, opening = true) {
     state.communityPlugins = null;
     paint();
   }
-  if (opening || !state.communityPlugins) void readCommunityPlans(app);
+  if (opening || (!state.communityPlugins && !state.communityPlansFailed)) void readCommunityPlans(app);
   if (opening || !state.bundledStore || app.storePublishedRead) void loadStoreCatalog(app, catalogChanged);
 }

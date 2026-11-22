@@ -38,6 +38,43 @@ test("安装按钮仅用于相同社区仓库的已审核计划，手动安装�
   assert.doesNotMatch(cards, /v9\.9\.9|data-installed|已安装/);
 });
 
+test("已登记发行包的详情区分读取中、失败、缺少本机计划，重试后恢复安装", async t => {
+  const packaged = {...entry, verifiedReleases: [{version: plan.version}]};
+  const state = {bundledStore: {official: [], community: [packaged]}, storeDetail: entry.id};
+  const listing: {onclick?: (event: any) => void} = {};
+  const doc = {getElementById: () => null};
+  const root = {ownerDocument: doc, addEventListener() {}, querySelectorAll: () => [],
+    querySelector: (s: string) => s === "[data-store-results]" ? listing : null};
+  const content = {ownerDocument: doc, querySelectorAll: () => [], querySelector: () => root};
+  const app: {state: typeof state; content: typeof content; communityRead?: Promise<unknown>} = {state, content};
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    requests.push(url);
+    return requests.length === 1 ? Response.json({error: "无法读取"}, {status: 503}) : Response.json({plugins: [plan]});
+  });
+  bindStore(app, content, false);
+  assert.match(renderStore(app), /正在核对安装条件/);
+  await assert.rejects(app.communityRead!);
+  assert.match(renderStore(app), /安装条件核对失败[\s\S]*?data-community-plans-retry/);
+  assert.match(renderStore(app), /安装说明/);
+  assert.doesNotMatch(renderStore(app), /data-community-install=/);
+  const manual = renderStore({state: {...app.state, bundledStore: catalog}});
+  assert.match(manual, /安装说明/);
+  assert.doesNotMatch(manual, /核对|data-community-plans-retry/);
+  const isolated = renderStore({state: {...state, communityPlugins: [], communityPlansFailed: false}});
+  assert.match(isolated, /当前没有可用的安装计划/);
+  assert.match(isolated, /安装说明/);
+  assert.doesNotMatch(isolated, /核对失败|data-community-install=|data-community-plans-retry/);
+  bindStore(app, content, false);
+  assert.equal(requests.length, 1);
+  listing.onclick!({target: {closest: (s: string) => s === "[data-community-plans-retry]" ? {} : null}});
+  assert.match(renderStore(app), /正在核对安装条件/);
+  await app.communityRead;
+  assert.match(renderStore(app), /data-community-install="paper"/);
+  assert.doesNotMatch(renderStore(app), /核对失败|data-community-plans-retry/);
+  assert.deepEqual(requests, ["/api/community-plugins", "/api/community-plugins"]);
+});
+
 test("从商店详情确认时核对显示的计划、列出依赖并只提交确认的计划键", async t => {
   const posts: any[] = [];
   t.mock.method(globalThis, "fetch", async (input: string, options: RequestInit) => {

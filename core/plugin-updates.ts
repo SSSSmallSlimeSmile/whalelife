@@ -64,6 +64,12 @@ function verifiedTarget(entry: Metadata, installed: string, host: string, platfo
   return best;
 }
 
+async function readCommunityUpdates(signal: AbortSignal) {
+  let incomplete = false;
+  const reviews = await readPublishedCommunityReviews(signal, fetch, () => { incomplete = true; });
+  return { reviews, incomplete };
+}
+
 export class PluginUpdates {
   private registry: Metadata;
   private host: string = bundled("../package.json").version;
@@ -71,7 +77,7 @@ export class PluginUpdates {
   private last?: { key: string; updates: Notice[]; incomplete?: boolean };
   private lastCheck = 0;
   private signal: AbortSignal;
-  private reviewing?: Promise<ReviewedCommunityEntry[]>;
+  private reviewing?: ReturnType<typeof readCommunityUpdates>;
   private communityVersions: CommunityVersions;
 
   constructor(signal: AbortSignal, communityVersions: CommunityVersions, registry = bundled("../market/official-releases.json")) {
@@ -144,8 +150,10 @@ export class PluginUpdates {
       if (![...local.keys()].some(id => !reserved.has(id))) return;
       try {
         // Recheck the published approvals on each manual check, including revocations.
-        this.reviewing ??= readPublishedCommunityReviews(this.signal).finally(() => { this.reviewing = undefined; });
-        const reviews = await this.reviewing;
+        this.reviewing ??= readCommunityUpdates(this.signal).finally(() => { this.reviewing = undefined; });
+        const result = await this.reviewing;
+        incomplete ||= result.incomplete;
+        const reviews = result.reviews;
         const candidates = reviews.filter(entry => {
           const plugin = local.get(entry.id);
           return plugin?.version && !reserved.has(entry.id) && (plugin.repository == null ||

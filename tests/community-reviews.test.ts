@@ -34,6 +34,34 @@ test("同一子插件不能同时由独立条目与另一发行包管理", () =>
   ]}), /已被占用/);
 });
 
+test("线上目录隔离错误插件及重名条目，仍为独立插件提供已审核的精确宿主版本", async () => {
+  const good = {...item, verifiedReleases:[{...release, hostRange:"=0.1.1"}]};
+  const invalid = {...item, id:"broken", verifiedReleases:[release, {...release, hostRange:"unsupported"}]};
+  const duplicate = {...good, id:"duplicate"};
+  const catalog = {official:[], community:[invalid, duplicate, good, duplicate, {...item, id:"manual"}]};
+  assert.throws(() => reviewedCommunityEntries(catalog), /审核记录无效/);
+  const skipped: string[] = [];
+  const reviews = await readPublishedCommunityReviews(new AbortController().signal, async () => Response.json(catalog),
+    error => skipped.push(error.pluginId));
+  assert.deepEqual(reviews.map(entry => entry.id), ["sample"]);
+  assert.equal(reviews[0].verifiedReleases![0].hostRange, "=0.1.1");
+  assert.deepEqual(new Set(skipped), new Set(["broken", "duplicate"]));
+});
+
+test("忽略无效记录时仍隔离所有争用同一子插件的发行包，顺序不影响结果", () => {
+  const parent = {...item, id:"root", verifiedReleases:[{...release, bundledPluginIds:["root/sub/child"]}]};
+  const sub = {...item, id:"root/sub", dependencies:["root"], verifiedReleases:[{...release,
+    dependencies:{root:"1.2.0"}, bundledPluginIds:["root/sub/child"]}]};
+  const good = {...item, verifiedReleases:[release]};
+  for (const community of [[parent, good, sub], [sub, good, parent]]) {
+    const skipped: string[] = [];
+    assert.deepEqual(reviewedCommunityEntries({official:[], community}, err => skipped.push(err.pluginId))
+      .map(entry => entry.id), ["sample"]);
+    assert.deepEqual(new Set(skipped), new Set(["root", "root/sub"]));
+    assert.throws(() => reviewedCommunityEntries({official:[], community}), /已被占用/);
+  }
+});
+
 test("撤下、断网和格式错误均不会沿用之前的社区发行授权", async () => {
   const signal = new AbortController().signal;
   const responses = [

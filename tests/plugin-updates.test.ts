@@ -180,6 +180,11 @@ test("only current, correctly identified approvals can recommend the highest rev
     replies.set(catalogURL, { ...catalog, community: [{ ...author, verifiedReleases: [invalid] }] });
     assert.deepEqual(await service.list([installed[1]], unrecognized), { updates: [], incomplete: true });
   }
+  const other = card("broken");
+  replies.set(catalogURL, { ...catalog, community: [reviewed, {...other, verifiedReleases:[{...review(other, "2.0.0"), sha256:"invalid"}]}] });
+  const partial = await service.list([installed[1], {id:other.id, version:"1.0.0"}], unrecognized);
+  assert.equal(partial.incomplete, true);
+  assert.deepEqual(partial.updates.map(p => p.id), [author.id]);
   assert.ok(requests.every(r => r.address === catalogURL));
 });
 

@@ -19,6 +19,10 @@ const versionPattern = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const platforms = new Set(["any", "aix", "darwin", "freebsd", "linux", "openbsd", "sunos", "win32", "android", "netbsd"]);
 const arches = new Set(["any", "arm", "arm64", "ia32", "loong64", "mips", "mipsel", "ppc", "ppc64", "riscv64", "s390", "s390x", "x64"]);
 const githubRepo = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/?$/;
+function validRepository(value: unknown): value is string {
+  const match = typeof value === "string" && githubRepo.exec(value);
+  return !!match && ![".", ".."].includes(match[2]);
+}
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -31,8 +35,15 @@ function pluginId(value: unknown): value is string {
 function idList(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= 128 && value.every(pluginId) && new Set(value).size === value.length;
 }
+class InvalidReview extends Error {
+  readonly pluginId: string;
+  constructor(pluginId: string, detail: string) {
+    super("社区发行包审核记录无效（" + pluginId + "）：" + detail);
+    this.pluginId = pluginId;
+  }
+}
 function invalid(context: string, detail: string): never {
-  throw Error("社区发行包审核记录无效（" + context + "）：" + detail);
+  throw new InvalidReview(context, detail);
 }
 
 function reviewedRelease(value: unknown, id: string, repository: string, required: string[]): ReviewedCommunityRelease {
@@ -58,53 +69,78 @@ function reviewedRelease(value: unknown, id: string, repository: string, require
     dependencies: Object.fromEntries(required.map(key => [key, deps[key] as string])), bundledPluginIds: children };
 }
 
-/** Only the maintainer-published catalog supplies executable package references. */
-export function reviewedCommunityEntries(catalog: unknown): ReviewedCommunityEntry[] {
-  if (!record(catalog) || !Array.isArray(catalog.community) || !Array.isArray(catalog.official))
-    return invalid("catalog", "目录结构不完整");
-  const owners = new Map<string, string>();
-  for (const id of reservedIds) owners.set(id, "official");
-  for (const entry of catalog.official) {
-    if (!record(entry) || !pluginId(entry.id)) return invalid("official", "无效的官方条目");
-    owners.set(entry.id, "official");
+function reviewedEntry(entry: Record<string, unknown>, id: string, primaryIds: ReadonlySet<string>) {
+  if (entry.verifiedReleases === undefined) return;
+  if (!validRepository(entry.repository) ||
+      typeof entry.name !== "string" || !entry.name.trim() || typeof entry.installation !== "string" ||
+      typeof entry.description !== "string" || !idList(entry.dependencies) || entry.dependencies.includes(id) ||
+      !Array.isArray(entry.verifiedReleases) || entry.verifiedReleases.length > 256)
+    return invalid(id, "仓库、依赖或发行版本列表不完整");
+  if (id.includes("/") && !entry.dependencies.includes(id.slice(0, id.lastIndexOf("/"))))
+    return invalid(id, "子插件需要登记直接父插件依赖");
+  const releases: ReviewedCommunityRelease[] = [];
+  for (const value of entry.verifiedReleases) {
+    const release = reviewedRelease(value, id, entry.repository, entry.dependencies);
+    const minimumHost = parseHostRange(release.hostRange)!.minimum;
+    const overlaps = (a: string, b: string) => a === b || a === "any" || b === "any";
+    if (releases.some(prev => prev.version === release.version && parseHostRange(prev.hostRange)!.minimum === minimumHost &&
+      overlaps(prev.platform, release.platform) && overlaps(prev.arch, release.arch))) return invalid(id, "同版本的平台匹配重复");
+    for (const child of release.bundledPluginIds ?? [])
+      if (primaryIds.has(child)) return invalid(id, "包内子插件 ID 已被占用：" + child);
+    releases.push(release);
   }
-  for (const entry of catalog.community) {
-    if (!record(entry) || !pluginId(entry.id) || owners.has(entry.id)) return invalid("catalog", "插件 ID 无效或重名");
-    owners.set(entry.id, entry.id);
-  }
-  const reviewed: ReviewedCommunityEntry[] = [];
-  for (const entry of catalog.community) {
-    if (entry.verifiedReleases === undefined) continue;
-    const id: string = entry.id;
-    const repo = typeof entry.repository === "string" && githubRepo.exec(entry.repository);
-    if (!repo || [".", ".."].includes(repo[2]) || typeof entry.name !== "string" || !entry.name.trim() ||
-        typeof entry.installation !== "string" || typeof entry.description !== "string" ||
-        !idList(entry.dependencies) || entry.dependencies.includes(id) ||
-        !Array.isArray(entry.verifiedReleases) || entry.verifiedReleases.length > 256)
-      return invalid(id, "仓库、依赖或发行版本列表不完整");
-    if (id.includes("/") && !entry.dependencies.includes(id.slice(0, id.lastIndexOf("/"))))
-      return invalid(id, "子插件需要登记直接父插件依赖");
-    const releases: ReviewedCommunityRelease[] = [];
-    for (const value of entry.verifiedReleases) {
-      const release = reviewedRelease(value, id, entry.repository, entry.dependencies);
-      const minimumHost = parseHostRange(release.hostRange)!.minimum;
-      const overlaps = (a: string, b: string) => a === b || a === "any" || b === "any";
-      if (releases.some(prev => prev.version === release.version && parseHostRange(prev.hostRange)!.minimum === minimumHost &&
-        overlaps(prev.platform, release.platform) && overlaps(prev.arch, release.arch))) return invalid(id, "同版本的平台匹配重复");
-      for (const child of release.bundledPluginIds ?? []) {
-        const owner = owners.get(child);
-        if (owner && owner !== id) return invalid(id, "包内子插件 ID 已被占用：" + child);
-        owners.set(child, id);
-      }
-      releases.push(release);
-    }
-    if (releases.length) reviewed.push({ id, repository: entry.repository, name: entry.name, description: entry.description,
-      installation: entry.installation, dependencies: entry.dependencies, verifiedReleases: releases });
-  }
-  return reviewed;
+  if (releases.length) return { id, repository: entry.repository, name: entry.name, description: entry.description,
+    installation: entry.installation, dependencies: entry.dependencies, verifiedReleases: releases };
 }
 
-export async function readPublishedCommunityReviews(shutdown: AbortSignal, request = fetch) {
+/** Validation tools fail closed on any error. Runtime readers can report and omit individual plugins. */
+export function reviewedCommunityEntries(catalog: unknown,
+    onInvalid: (error: InvalidReview) => void = error => { throw error; }): ReviewedCommunityEntry[] {
+  if (!record(catalog) || !Array.isArray(catalog.community) || !Array.isArray(catalog.official))
+    return invalid("catalog", "目录结构不完整");
+  const primaryIds = new Set(reservedIds);
+  for (const entry of catalog.official) {
+    if (!record(entry) || !pluginId(entry.id)) return invalid("official", "无效的官方条目");
+    primaryIds.add(entry.id);
+  }
+  const duplicates = new Set<string>();
+  for (const entry of catalog.community) {
+    if (!record(entry) || !pluginId(entry.id)) continue;
+    if (primaryIds.has(entry.id)) duplicates.add(entry.id);
+    primaryIds.add(entry.id);
+  }
+  const reviewed = [];
+  const owners = new Map<string, string>();
+  const conflicts = new Map<string, string>();
+  for (const entry of catalog.community) {
+    try {
+      if (!record(entry) || !pluginId(entry.id)) invalid("catalog", "插件 ID 无效或重名");
+      if (duplicates.has(entry.id)) invalid(entry.id, "插件 ID 无效或重名");
+      const plugin = reviewedEntry(entry, entry.id, primaryIds);
+      if (!plugin) continue;
+      for (const child of plugin.verifiedReleases.flatMap(release => release.bundledPluginIds ?? [])) {
+        const owner = owners.get(child);
+        if (owner && owner !== plugin.id) {
+          conflicts.set(owner, child);
+          conflicts.set(plugin.id, child);
+        } else owners.set(child, plugin.id);
+      }
+      reviewed.push(plugin);
+    } catch (err) {
+      if (!(err instanceof InvalidReview)) throw err;
+      onInvalid(err);
+    }
+  }
+  return reviewed.filter(plugin => {
+    const child = conflicts.get(plugin.id);
+    if (!child) return true;
+    onInvalid(new InvalidReview(plugin.id, "包内子插件 ID 已被占用：" + child));
+    return false;
+  });
+}
+
+export async function readPublishedCommunityReviews(shutdown: AbortSignal, request = fetch,
+    onInvalid: (error: InvalidReview) => void = error => console.warn(error.message)) {
   const response = await request(publishedCatalog, { cache: "no-store", redirect: "error", credentials: "omit",
     referrerPolicy: "no-referrer", signal: AbortSignal.any([shutdown, AbortSignal.timeout(8_000)]) });
   if (!response.ok || !response.body) {
@@ -122,5 +158,5 @@ export async function readPublishedCommunityReviews(shutdown: AbortSignal, reque
       chunks.push(item.value);
     }
   } finally { reader.releaseLock(); }
-  return reviewedCommunityEntries(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+  return reviewedCommunityEntries(JSON.parse(Buffer.concat(chunks).toString("utf8")), onInvalid);
 }
