@@ -6,11 +6,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as wait } from "node:timers/promises";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { holdHostLock, hostReleaseDirectory, readHostUpdateState, runHostSupervisor } from "../core/host-supervisor.ts";
+import { checkHostTrialEntry } from "../core/host-launcher-check.ts";
 import { prepareHostBackup } from "../core/host-update-backup.ts";
 
 // Run a real supervised child with the same IPC/bootstrap as production. Its small boot fixture
@@ -73,6 +75,22 @@ test("loss of a formerly running plugin restores data touched by trial and resta
   assert.match(state.lastResult!.message, /gallery/);
   assert.deepEqual(await readFile(image), original);
 });
+test("after rollback the old program starts before its restored backup is retired", async () => {
+  const {root,target} = await fixture();
+  await program(root,"0.1.0", `
+    if (existsSync(join(root,'asked'))) {
+      const dir = join(root,'.whalelife-updates');
+      const state = JSON.parse(readFileSync(join(dir,'state.json'),'utf8'));
+      const slot = join(dir,state.backupSlot);
+      writeFileSync(join(root,'restored-before-cleanup'),JSON.stringify([state.lastResult.status,existsSync(join(slot,'owner')),existsSync(join(slot,'retired'))]));
+      setTimeout(ready,250);
+    } else setTimeout(() => { writeFileSync(join(root,'asked'),'yes'); updates.activate('0.2.0').catch(() => process.exit(1)); },300);
+  `);
+  await program(target,"0.2.0","throw Error('bad candidate');");
+  assert.equal(await runHostSupervisor(root),0);
+  assert.deepEqual(JSON.parse(await readFile(join(root,"restored-before-cleanup"),"utf8")),["rolled-back",true,false]);
+});
+
 test("a candidate that exits right after its first ready report triggers rollback", async () => {
   const {root,target,image} = await fixture(), original = await readFile(image);
   await program(target, "0.2.0", "writeFileSync(image, 'trial changed'); setTimeout(() => process.exit(1), 80);");
@@ -88,7 +106,8 @@ test("a hung trial is terminated and rolled back within the health deadline", as
   assert.match((await readHostUpdateState(root)).lastResult!.message, /限定时间/);
 });
 test("failure to write the update journal rejects that request and keeps the running application", async () => {
-  const {root} = await fixture();
+  const {root,target} = await fixture();
+  await program(target, "0.2.0", "");
   await program(root, "0.1.0", `
     setTimeout(async () => {
       mkdirSync(join(root,'.whalelife-updates/state.json'), {recursive:true});
@@ -257,7 +276,12 @@ test("successive durable selections survive an older JSON mirror, leftover backu
     if (process.argv[4] === 'active') {
       writeFileSync(image, 'newest user data');
       // Prevent automatic cleanup of this snapshot. It must never be read as rollback authority.
-      writeFileSync(join(root, '.whalelife-updates/backup/owner'), 'unknown backup owner');
+      const dir = join(root, '.whalelife-updates');
+      if (!existsSync(join(root, 'protected-snapshot'))) {
+        const {backupSlot} = JSON.parse(readFileSync(join(dir,'state.json'),'utf8'));
+        writeFileSync(join(dir,backupSlot,'owner'), 'unknown backup owner');
+        writeFileSync(join(root, 'protected-snapshot'), backupSlot);
+      }
       setTimeout(ready, 250);
     }
   `);
@@ -274,5 +298,74 @@ test("successive durable selections survive an older JSON mirror, leftover backu
   await writeFile(journal, "damaged journal");
   await assert.rejects(runHostSupervisor(root), /database/i);
   assert.equal(await readFile(image, "utf8"), "newest user data");
-  assert.ok(await readFile(join(directory, "backup/items.json"), "utf8"));
+  assert.ok(await readFile(join(directory, newest.backupSlot!, "items.json"), "utf8"));
 });
+
+test("linking a trial entry checks its exports and dependencies without running candidate code", async () => {
+  const {root,target} = await fixture();
+  await program(target,"0.2.0","");
+  const index = join(target, "core/index.ts");
+  const marker = join(root, "candidate-module-evaluated");
+  const sideEffect = "import {writeFileSync} from 'node:fs';writeFileSync(" + JSON.stringify(marker) + ",'ran');";
+  await writeFile(join(target, "core/effect.ts"), sideEffect);
+  await writeFile(index, "import './effect.ts';" + sideEffect + "export function boot(){}; export {boot as prepareHostTrial};");
+  await checkHostTrialEntry(target);
+  await assert.rejects(stat(marker), {code:"ENOENT"});
+  await writeFile(index, "export function boot(){}; import './effect.ts';");
+  await assert.rejects(checkHostTrialEntry(target), /预检入口/);
+  await assert.rejects(stat(marker), {code:"ENOENT"});
+});
+
+test("an on-disk launcher change is refused while the same old worker continues serving", async () => {
+  const {root,target} = await fixture();
+  const core = join(root, "launcher-core");
+  await cp(new URL("../core",import.meta.url), core, {recursive:true});
+  await program(target, "0.2.0", "");
+  await program(root, "0.1.0", `
+    setTimeout(async () => {
+      const path=join(root,"launcher-core","host-child.ts");
+      writeFileSync(path,readFileSync(path,"utf8")+"\\n// replaced during service\\n");
+      try { await updates.activate("0.2.0"); process.exit(2); }
+      catch(error) {
+        writeFileSync(join(root,"rejection"),JSON.stringify({message:error.message,serving:!starting()}));
+        ready();
+      }
+    },300);
+  `);
+  const manager = await import(pathToFileURL(join(core,"host-supervisor.ts")).href);
+  assert.equal(await manager.runHostSupervisor(root),0);
+  const result = JSON.parse(await readFile(join(root,"rejection"),"utf8"));
+  assert.match(result.message,/启动程序在运行期间已改变/);
+  assert.equal(result.serving,true);
+  assert.deepEqual(await readHostUpdateState(root),{active:null,pending:null,lastResult:null});
+});
+
+for (const failure of ["legacy-worker", "no-trial-entry"]) test(
+  `a ${failure} is reported before journaling or stopping the old application`, async () => {
+    const {root,target,image} = await fixture(), original = await readFile(image);
+    await program(target,"0.2.0","");
+    if (failure === "no-trial-entry") await writeFile(join(target,"core/index.ts"),
+      "throw Error('candidate executed'); export function boot(){};");
+    await program(root, "0.1.0", `
+      setTimeout(async () => {
+        if (${JSON.stringify(failure)} === "legacy-worker") {
+          const send = process.send.bind(process);
+          process.send = (packet,...args) => {
+            if (packet.type === "host-activate") delete packet.launcherProtocol;
+            return send(packet,...args);
+          };
+        }
+        try { await updates.activate("0.2.0"); process.exit(2); }
+        catch(error) {
+          writeFileSync(join(root,"rejection"),JSON.stringify({message:error.message,serving:!starting()}));
+          ready();
+        }
+      },300);
+    `);
+    assert.equal(await runHostSupervisor(root),0);
+    const result = JSON.parse(await readFile(join(root,"rejection"),"utf8"));
+    assert.equal(result.serving,true);
+    assert.match(result.message,failure === "legacy-worker" ? /根目录的启动器/ : /预检入口/);
+    assert.deepEqual(await readFile(image),original);
+    assert.deepEqual(await readHostUpdateState(root),{active:null,pending:null,lastResult:null});
+  });

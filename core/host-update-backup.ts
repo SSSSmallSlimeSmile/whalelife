@@ -2,12 +2,28 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { directoryAt } from "./official-package-files.ts";
 
 const area = ".whalelife-updates";
 const format = "whalelife.host-backup/1";
+const retired = "whalelife.host-backup/retired/1";
+export const validHostBackupSlot = (value: unknown): value is string =>
+  typeof value === "string" && /^backup-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+const preparing = /^\.backup-preparing-[A-Za-z0-9]{6}$/;
+
+function backupName(slot?: string) {
+  if (slot === undefined) return "backup"; // Existing installations and their interrupted updates.
+  if (!validHostBackupSlot(slot)) throw Error("本体更新备份位置无效。");
+  return slot;
+}
+
+async function marker(path: string, expected: string) {
+  const info = await stat(path);
+  return !!info && info.isFile() && info.nlink === 1 && info.size === Buffer.byteLength(expected) &&
+    await readFile(path, "utf8") === expected;
+}
 const reserved = new Set([area, ".git", ".artifacts", "core", "market", "node_modules", "runtime", "tools", "tests",
   "architecture", "start.bat", "package.json", "package-lock.json"]);
 type BackupItem = { path: string; present: boolean };
@@ -38,57 +54,54 @@ async function backupPaths(root: string) {
   return paths;
 }
 
-async function validateBackup(root: string) {
-  const base = await directoryAt(root, area + "/backup");
+async function validateBackup(root: string, slot?: string) {
+  const base = await directoryAt(root, area + "/" + backupName(slot));
   if (!base) return;
   const owner = join(base, "owner");
-  if (!(await lstat(owner)).isFile() || await readFile(owner, "utf8") !== format)
+  if (!await marker(owner, format))
     throw Error("现有备份目录归属不明，请保留现场。");
   return base;
 }
 
-export async function prepareHostBackup(root: string) {
+export async function prepareHostBackup(root: string, slot?: string) {
   const parent = (await directoryAt(root, area, true))!;
   const paths = await backupPaths(root);
-  const committed = join(parent, "backup");
+  const committed = join(parent, backupName(slot));
   if (await stat(committed)) throw Error("上次本体更新的资料备份尚待处理。");
   const base = await mkdtemp(join(parent, ".backup-preparing-"));
-  try {
-    await writeFile(join(base, "owner"), format, { flag: "wx", mode: 0o600 });
-    await mkdir(join(base, "saved"));
-    await mkdir(join(base, "displaced"));
-    await mkdir(join(base, "restoring"));
-    const items: BackupItem[] = [];
-    for (const path of paths) {
-      const source = join(root, path);
-      const parentPath = dirname(path).split(sep).join("/");
-      await directoryAt(root, parentPath === "." ? "" : parentPath);
-      const exists = !!await stat(source);
-      if (exists) await cp(source, join(base, "saved", String(items.length)), {
-        recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
-        filter: async entry => {
-          const info = await lstat(entry);
-          if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory()))
-            throw Error("资料目录含有链接或特殊文件，无法完整备份：" + relative(root, entry));
-          return true;
-        },
-      });
-      items.push({ path, present: exists });
-    }
-    // The supervisor cannot start the trial until this manifest is complete.
-    await writeFile(join(base, "items.json"), JSON.stringify(items), { flag: "wx", mode: 0o600 });
-    await rename(base, committed);
-  } catch (error) {
-    await rm(base, {recursive: true, force: true});
-    throw error;
+  await writeFile(join(base, "owner"), format, { flag: "wx", mode: 0o600 });
+  await mkdir(join(base, "saved"));
+  await mkdir(join(base, "displaced"));
+  await mkdir(join(base, "restoring"));
+  const items: BackupItem[] = [];
+  for (const path of paths) {
+    const source = join(root, path);
+    const parentPath = dirname(path).split(sep).join("/");
+    await directoryAt(root, parentPath === "." ? "" : parentPath);
+    const exists = !!await stat(source);
+    if (exists) await cp(source, join(base, "saved", String(items.length)), {
+      recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
+      filter: async entry => {
+        const info = await lstat(entry);
+        if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory()))
+          throw Error("资料目录含有链接或特殊文件，无法完整备份：" + relative(root, entry));
+        return true;
+      },
+    });
+    items.push({ path, present: exists });
   }
+  // The supervisor cannot start the trial until this manifest is complete.
+  await writeFile(join(base, "items.json"), JSON.stringify(items), { flag: "wx", mode: 0o600 });
+  await rename(base, committed);
 }
 
-export async function restoreHostBackup(root: string) {
-  const base = await validateBackup(root);
+export async function restoreHostBackup(root: string, slot?: string) {
+  const name = backupName(slot);
+  const base = await validateBackup(root, slot);
   if (!base) throw Error("缺少更新前的资料备份，已停止恢复。");
-  for (const name of ["saved", "displaced", "restoring"]) {
-    if (!await directoryAt(root, area + "/backup/" + name)) throw Error("资料备份目录不完整：" + name);
+  if (await stat(join(base, "retired"))) throw Error("本体更新引用了已退役的备份，请保留现场。");
+  for (const child of ["saved", "displaced", "restoring"]) {
+    if (!await directoryAt(root, area + "/" + name + "/" + child)) throw Error("资料备份目录不完整：" + name);
   }
   const items: BackupItem[] = JSON.parse(await readFile(join(base, "items.json"), "utf8"));
   for (const [i, item] of items.entries()) {
@@ -109,15 +122,57 @@ export async function restoreHostBackup(root: string) {
   }
 }
 
-export async function discardHostBackup(root: string) {
-  const base = await validateBackup(root);
-  if (base) await rm(base, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+// Called only by the manager after the selected worker is serving and before it
+// accepts the next transaction. A locked descendant need not be renamed or removed.
+export async function retireHostBackup(root: string, slot?: string) {
   const parent = await directoryAt(root, area);
   if (!parent) return;
-  for (const entry of await readdir(parent, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\.backup-preparing-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
-    const temp = join(parent, entry.name), owner = join(temp, "owner");
-    if ((await stat(owner))?.isFile() && await readFile(owner, "utf8") === format)
-      await rm(temp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  const selected = backupName(slot);
+  for (const entry of await readdir(parent, {withFileTypes:true})) {
+    if (!entry.isDirectory() || (entry.name !== selected && !preparing.test(entry.name))) continue;
+    const base = join(parent,entry.name), label = join(base,"retired");
+    if (await marker(label,retired)) continue;
+    if (!await marker(join(base,"owner"),format)) {
+      if (entry.name === selected) throw Error("现有备份目录归属不明，已保留现场。");
+      continue;
+    }
+    await writeFile(label, retired, {flag:"wx",mode:0o600});
   }
+}
+
+// New transactions always use a fresh slot. Only a completed, marked snapshot
+// can enter this path, even if a new trial starts during a slow filesystem call.
+export async function collectRetiredHostBackups(root: string) {
+  const parent = await directoryAt(root, area);
+  if (!parent) return false;
+  let pending = false;
+  for (const entry of await readdir(parent, {withFileTypes:true})) {
+    if (!entry.isDirectory() || !(entry.name === "backup" || validHostBackupSlot(entry.name) || preparing.test(entry.name))) continue;
+    const base = join(parent,entry.name), owner = join(base,"owner"), label = join(base,"retired");
+    try {
+      if (!await marker(label,retired)) continue;
+      const names = await readdir(base);
+      if (!await marker(owner,format)) {
+        // Cleanup can be interrupted after unlinking owner. Never remove unknown contents.
+        if (names.some(name => name !== "retired")) continue;
+      } else {
+        for (const name of names) {
+          if (name !== "owner" && name !== "retired") await rm(join(base,name), {recursive:true, force:true});
+        }
+        await unlink(owner);
+      }
+      await unlink(label);
+      await rmdir(base);
+    } catch (error: any) {
+      if (error.code === "ENOENT") continue;
+      if (!["EBUSY","EPERM","EACCES","ENOTEMPTY"].includes(error.code)) throw error;
+      pending = true;
+    }
+  }
+  return pending;
+}
+
+export async function discardHostBackup(root: string) {
+  await retireHostBackup(root);
+  await collectRetiredHostBackups(root);
 }

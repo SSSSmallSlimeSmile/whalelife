@@ -9,8 +9,9 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
+import { checkHostTrialEntry, launcherFingerprint, launcherProtocol, launcherUpgradeNeeded } from "./host-launcher-check.ts";
 import { directoryAt } from "./official-package-files.ts";
-import { discardHostBackup, prepareHostBackup, restoreHostBackup } from "./host-update-backup.ts";
+import { collectRetiredHostBackups, prepareHostBackup, restoreHostBackup, retireHostBackup, validHostBackupSlot } from "./host-update-backup.ts";
 import { installLogOutputGuards, writeLogOutput } from "./log-output.ts";
 
 const base = ".whalelife-updates";
@@ -25,6 +26,7 @@ export interface HostUpdateState {
   active: string | null;
   pending: string | null;
   phase?: "preparing" | "trial" | "handover";
+  backupSlot?: string;
   // Older trials booted real plugins and may already have delivered external work.
   preflightOnly?: true;
   delivery?: { previous: string | null; plugins: string[] };
@@ -35,6 +37,7 @@ function parseState(raw: string): HostUpdateState {
   if (s?.windowsJournal === true) throw Error("缺少本体更新事务数据库，请保留现有资料与快照，核对 state.sqlite 后重启。");
   if (!s || !(s.active === null || validVersion(s.active)) ||
     !(s.pending === null || (validVersion(s.pending) && ["preparing", "trial", "handover"].includes(s.phase))) ||
+    (s.backupSlot !== undefined && !validHostBackupSlot(s.backupSlot)) ||
     (s.delivery !== undefined && !(s.pending === null && validVersion(s.active) && s.delivery &&
       (s.delivery.previous === null || validVersion(s.delivery.previous)) &&
       Array.isArray(s.delivery.plugins) && s.delivery.plugins.every((id: unknown) => typeof id === "string"))) ||
@@ -163,7 +166,7 @@ export async function holdHostLock(root: string, role: "manager" | "worker", wai
 }
 
 type Health = { version: string; plugins: string[]; error?: string };
-type Activation = { version: string; plugins: string[] };
+type Activation = { version: string; plugins: string[]; launcherProtocol?: string };
 const childEntry = fileURLToPath(new URL("./host-child.ts", import.meta.url));
 function deferred<T>() {
   let resolve!: (result: T) => void;
@@ -206,7 +209,7 @@ function launch(root: string, program: string, trial: boolean) {
       probe = { id: randomUUID(), resolve: reply.resolve };
       const timer = setTimeout(() => reply.resolve(null), 10_000);
       try {
-        child.send({ type: serve ? "host-serving" : "host-probe", id: probe.id, required }, error => { if (error) reply.resolve(null); });
+        child.send({ type: serve ? "host-serving" : "host-probe", id: probe.id, required, launcherProtocol }, error => { if (error) reply.resolve(null); });
         return await reply.promise;
       } finally { clearTimeout(timer); probe = undefined; }
     },
@@ -221,9 +224,9 @@ async function recover(root: string, state: HostUpdateState, message: string) {
   if (!state.pending) return state;
   if (state.phase === "trial" || state.phase === "handover") {
     if (state.preflightOnly !== true) throw Error("旧启动器的更新中断，插件可能已执行外部操作。请先复制整个实例目录，核对现有插件投递记录及 .whalelife-updates/backup；确认要保留的程序和资料后再恢复启动。现场、旧快照和 state.json 均已保留。");
-    await restoreHostBackup(root);
+    await restoreHostBackup(root, state.backupSlot);
   }
-  const restored: HostUpdateState = { active: state.active, pending: null, lastResult: result("rolled-back", state.pending, message) };
+  const restored: HostUpdateState = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("rolled-back", state.pending, message) };
   await save(root, restored);
   return restored;
 }
@@ -235,24 +238,37 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
   const unlock = await holdHostLock(root, "manager");
   let child: ReturnType<typeof launch> | undefined;
   let stopping = false;
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  let cleanup = Promise.resolve();
   const stop = () => { stopping = true; child?.stop(); };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
     // A previous parent may have been forcibly terminated while its worker is still draining.
     // Wait for that worker's kernel lock before reading a pending trial or touching its backup.
+    const startupFingerprint = await launcherFingerprint();
     await (await holdHostLock(root, "worker", 30_000))();
     let state = await readHostUpdateState(root);
     let previousPlugins: string[] = [];
     if (state.delivery) {
       // In the older protocol this selected worker may already have accepted writes.
       // Treat an outstanding acknowledgement as committed, including if its next boot fails.
-      state = { active: state.active, pending: null, lastResult: result("updated", state.active!, "沿用上次接管选定的版本，已保留现有资料") };
+      state = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("updated", state.active!, "沿用上次接管选定的版本，已保留现有资料") };
       await save(root, state);
     } else {
       state = await recover(root, state, "上次更新中断，已恢复之前的版本");
     }
-    const cleanBackup = () => discardHostBackup(root).catch((e: Error) => writeLogOutput("更新备份暂未清理：" + e.message, "stderr"));
+    const cleanLater = () => {
+      clearTimeout(cleanupTimer);
+      cleanup = cleanup.then(async () => {
+        if (stopping) return;
+        const pending = await collectRetiredHostBackups(root);
+        if (pending && !stopping) {
+          clearTimeout(cleanupTimer);
+          cleanupTimer = setTimeout(cleanLater, 60_000).unref();
+        }
+      }).catch((e: Error) => { writeLogOutput("更新备份暂未清理：" + e.message, "stderr"); });
+    };
     while (!stopping) {
       const trial = state.pending !== null;
       const version = state.pending ?? state.active;
@@ -291,20 +307,29 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
           if (status !== 0 || stopping) throw Error("新版预检未正常结束");
           // No worker is running. Make the selection irreversible before forking a
           // process capable of importing installed plugins or serving real requests.
-          const selected: HostUpdateState = { active: version, pending: null, lastResult: result("updated", version!, "新版核心及原有插件文件已通过预检，已切换版本") };
+          const selected: HostUpdateState = { active: version, pending: null, backupSlot: state.backupSlot, lastResult: result("updated", version!, "新版核心及原有插件文件已通过预检，已切换版本") };
           await save(root, selected);
           state = selected;
           continue;
         }
         if (!await child.health(true)) throw Error("本体启动后未响应健康检查");
-        if (state.lastResult) await cleanBackup();
+        // The previous worker is already serving. Retire only the completed transaction's slot.
+        if (state.lastResult) await retireHostBackup(root, state.backupSlot)
+          .catch((e: Error) => writeLogOutput("更新备份已保留：" + e.message, "stderr"));
+        cleanLater();
         let next: Activation | null;
         for (;;) {
           next = await child.next();
           if (!next || stopping) { if (stopping) child.stop(); return await child.exit; }
           try {
             if (next.version === health.version) throw Error("本体已运行该版本");
-            const preparing: HostUpdateState = { ...state, pending: next.version, phase: "preparing" };
+            if (next.launcherProtocol !== launcherProtocol) throw Error(launcherUpgradeNeeded);
+            const candidate = await directoryAt(root, base + "/releases/" + next.version);
+            if (!candidate) throw Error("新版暂存目录不存在。");
+            await checkHostTrialEntry(candidate);
+            if (await launcherFingerprint() !== startupFingerprint)
+              throw Error("安装根目录的启动程序在运行期间已改变。请重新启动 WhaleLife 后再更新。");
+            const preparing: HostUpdateState = { ...state, pending: next.version, phase: "preparing", backupSlot: "backup-" + randomUUID() };
             await save(root, preparing);
             state = preparing;
             break;
@@ -316,15 +341,14 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
         child = undefined;
         try {
           if (status !== 0 || stopping) throw Error("原实例未正常结束，已取消切换");
-          await prepareHostBackup(root);
+          await prepareHostBackup(root, state.backupSlot);
           const testing: HostUpdateState = { ...state, phase: "trial", preflightOnly: true };
           await save(root, testing);
           state = testing;
         } catch (error: any) {
-          const original: HostUpdateState = { active: state.active, pending: null, lastResult: result("failed", next.version, error.message) };
+          const original: HostUpdateState = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("failed", next.version, error.message) };
           await save(root, original);
           state = original;
-          await cleanBackup();
         }
         continue;
       } catch (error: any) { reason = error.message; }
@@ -343,11 +367,13 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
       if (state.pending === null && state.active === version) continue;
       if (state.pending !== version) throw Error("更新事务记录与当前预检不符，已保留现场：" + reason);
       state = await recover(root, state, reason);
-      await cleanBackup();
     }
     return 0;
   } finally {
+    stopping = true;
+    clearTimeout(cleanupTimer);
     if (child) { child.stop(); await child.exit; }
+    await cleanup;
     process.off("SIGINT", stop); process.off("SIGTERM", stop);
     await unlock();
   }

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { holdHostLock } from "./host-supervisor.ts";
 import { installProcessLifecycle } from "./process-lifecycle.ts";
 import { installLogOutputGuards, writeLogOutput } from "./log-output.ts";
+import { launcherProtocol, launcherUpgradeNeeded } from "./host-launcher-check.ts";
 import type { boot } from "./index.ts";
 
 // This entry is always from the original installation with the supervisor's matching IPC protocol.
@@ -17,7 +18,7 @@ async function start() {
     throw Error("本体工作进程必须由当前实例的主进程启动");
   let app: Awaited<ReturnType<typeof boot>> | undefined;
   let shutdown: (() => void) | undefined;
-  let closing = false, serving = false;
+  let closing = false, serving = false, compatibleManager = false;
   let activation: { resolve(): void; reject(error: Error): void } | undefined;
   let version = "";
   const activePlugins = () => app!.runtime.list().filter((p: any) => !p.builtin && p.status === "active").map((p: any) => p.id);
@@ -35,7 +36,10 @@ async function start() {
         if (mode === "trial") {
           if (packet.type === "host-serving") throw Error("预检进程不能接管服务");
           await app.runtime.checkInstalledPlugins(packet.required);
-        } else if (packet.type === "host-serving") serving = true;
+        } else if (packet.type === "host-serving") {
+          compatibleManager = packet.launcherProtocol === launcherProtocol;
+          serving = true;
+        }
         if (!closing) process.send?.({ type: "host-confirmed", id: packet.id, version, plugins: activePlugins() });
       } catch (error: any) {
         if (!closing) process.send?.({ type: "host-confirmed", id: packet.id, version, plugins: [], error: error.message });
@@ -56,14 +60,15 @@ async function start() {
   const { HostUpdates } = await load("host-updates.ts");
   const updates = new HostUpdates(root, manifest.version, (version: string) => {
     if (!serving || closing || !app || !process.connected) throw Error("本体正在启动或关闭，请稍后确认更新");
+    if (!compatibleManager) throw Error(launcherUpgradeNeeded);
     if (activation) throw Error("本体更新正在进行");
     return new Promise<void>((resolve, reject) => {
       activation = { resolve, reject };
-      process.send!({ type: "host-activate", version, plugins: activePlugins() }, error => {
+      process.send!({ type: "host-activate", version, plugins: activePlugins(), launcherProtocol }, error => {
         if (error) { activation = undefined; reject(error); }
       });
     });
-  });
+  }, undefined, () => compatibleManager);
   if (mode === "trial") {
     if (typeof candidate.prepareHostTrial !== "function") throw Error("新版程序缺少安全预检入口，已取消更新");
     app = await candidate.prepareHostTrial(root, updates, () => true);

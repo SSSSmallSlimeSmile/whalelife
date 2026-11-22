@@ -5,6 +5,7 @@
 import { lstat, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { launcherUpgradeNeeded } from "./host-launcher-check.ts";
 import { directoryAt } from "./official-package-files.ts";
 import { latestHostRelease, stageHostRelease, type HostRelease } from "./host-release.ts";
 import { hostReleaseDirectory, readHostUpdateState } from "./host-supervisor.ts";
@@ -19,17 +20,20 @@ export class HostUpdates {
   current: string;
   private activate?: (version: string) => void | Promise<void>;
   private request: typeof fetch;
+  private launcherReady: () => boolean;
   private release?: HostRelease | null;
   private checking?: Promise<void>;
   private phase: "idle" | "preparing" | "restarting" = "idle";
   private error?: string;
   private failed?: Result;
 
-  constructor(root: string, current: string, activate?: (version: string) => void | Promise<void>, request = fetch) {
+  constructor(root: string, current: string, activate?: (version: string) => void | Promise<void>, request = fetch,
+    launcherReady: () => boolean = () => false) {
     this.root = root;
     this.current = current;
     this.activate = activate;
     this.request = request;
+    this.launcherReady = launcherReady;
   }
 
   async check() {
@@ -49,12 +53,15 @@ export class HostUpdates {
   async view() {
     const stored = this.activate ? await readHostUpdateState(this.root) : undefined;
     const lastResult = this.failed ?? stored?.lastResult ?? undefined;
+    const supported = !!this.activate && this.launcherReady();
     return { current: this.current, latest: this.release ? { version: this.release.version, url: this.release.url } : null,
-      checked: this.release !== undefined, phase: this.phase, supported: !!this.activate, lastResult, error: this.error };
+      checked: this.release !== undefined, phase: this.phase, supported, lastResult,
+      error: this.error ?? (this.release && this.activate && !supported ? launcherUpgradeNeeded : undefined) };
   }
 
   async apply(input: {version?: unknown; confirmed?: unknown} | null) {
     if (!this.activate) throw conflict("当前启动方式不支持自动重启，请用标准启动入口运行 WhaleLife。");
+    if (!this.launcherReady()) throw conflict(launcherUpgradeNeeded);
     if (this.phase !== "idle") throw conflict("本体更新正在进行。");
     const release = this.release;
     if (!release || input?.confirmed !== true || input.version !== release.version)

@@ -20,7 +20,7 @@ test("仅查询、过期版本和未确认操作均不能启动更新；发行�
   const updates = new HostUpdates(root, "0.1.0", () => { activated++; }, async () => {
     fetched++;
     return Response.json(metadata(digest));
-  });
+  }, () => true);
   assert.equal((await updates.view()).checked, false);
   assert.equal(fetched, 0);
   const [first, second] = await Promise.all([updates.check(), updates.check()]);
@@ -38,6 +38,25 @@ test("仅查询、过期版本和未确认操作均不能启动更新；发行�
   assert.equal(result.lastResult?.status, "failed");
   assert.match(result.lastResult!.message, /发行版本或摘要已变化/);
   assert.equal(activated, 0);
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("旧安装启动器无法申请停机，仍能读取当前状态和正式发行信息", async () => {
+  const root = await temporaryDirectory("whale-legacy-launcher-");
+  let requests = 0, activations = 0;
+  // The old worker passes an activation callback but cannot negotiate a detached trial.
+  const updates = new HostUpdates(root, "0.1.0", () => {activations++;}, async () => {
+    requests++;
+    return Response.json(metadata("a".repeat(64)));
+  });
+  const snapshot = await updates.check();
+  assert.equal(snapshot.current, "0.1.0");
+  assert.equal(snapshot.latest?.version, "0.1.1");
+  assert.equal(snapshot.supported, false);
+  assert.match(snapshot.error!, /根目录的启动器/);
+  await assert.rejects(updates.apply({version:"0.1.1", confirmed:true}), {status:409});
+  assert.deepEqual(await updates.view(), snapshot);
+  assert.deepEqual([requests, activations], [1, 0]);
   assert.deepEqual(await readdir(root), []);
 });
 
