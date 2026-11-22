@@ -130,7 +130,8 @@ class ConsoleApp {
       const r = drawer.getBoundingClientRect();
       if (event.clientX < r.left || event.clientX >= r.right || event.clientY < r.top || event.clientY >= r.bottom) this.leaveStore(true);
     });
-    window.addEventListener("focus", () => this.syncView());
+    // 切回窗口只做静默同步：核对会话、补漏，不重拉会话也不跳位置
+    window.addEventListener("focus", () => this.syncView({ quiet: true }));
     $("login-form").onsubmit = (event) => {
       event.preventDefault();
       this.login();
@@ -431,7 +432,11 @@ class ConsoleApp {
     ]);
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
     this.sessionReady = true;
-    if (this.state.session !== id) this.state.sessionContext = null;
+    if (this.state.session !== id) {
+      this.state.sessionContext = null;
+      // 换会话才回到最新一条；同一会话刷新不动位置。
+      this.pendingScrollBottom = true;
+    }
     this.state.session = id;
     this.state.sessions = choices.items;
     this.state.sessionName = choices.items.find(item => item.id === id)?.name || id;
@@ -465,9 +470,23 @@ class ConsoleApp {
         $("chat-context").textContent = error.message;
     }
   }
-  async syncView() {
+  async syncView(options) {
     if ($("store-drawer").open) return;
     const page = this.state.page;
+    if (options?.quiet === true) {
+      // 切回窗口只刷状态与上下文，不重拉会话：重拉会让人正读着的消息被顶掉。
+      if (!this.authenticated || this.syncing || this.state.chatBusy) return;
+      this.syncing = true;
+      try {
+        await this.refreshStatus();
+        if (page === "chat") await this.refreshSessionContext();
+      } catch (error) {
+        if (error.status === 401) this.requireLogin();
+      } finally {
+        this.syncing = false;
+      }
+      return;
+    }
     if (this.authenticated && (page.startsWith("extension:") || page.startsWith("plugin:")) && !this.syncing) {
       this.syncing = true;
       try {
@@ -775,10 +794,16 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
-  renderMessages() {
+  renderMessages(options) {
+    const opts = options || {};
     const personaName = this.state.status.personaName || "助手";
     const box = $("messages");
     if (!box) return;
+    // 重画会整块换掉 innerHTML，滚动位置跟着归零。这里先记住：贴底才跟到底，
+    // 否则原地不动——否则定时刷新一次就把正在读的旧消息甩到最新。
+    const prevTop = box.scrollTop;
+    const prevNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const pinBottom = this.takeScrollPin();
     if (!this.state.messages.length) {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
       this.ensureChatScroll();
@@ -790,7 +815,8 @@ class ConsoleApp {
           `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
       )
       .join("");
-    box.scrollTop = box.scrollHeight;
+    const stick = opts.anchor === "keep" ? false : pinBottom || prevNearBottom;
+    this.setScrollTop(box, stick ? box.scrollHeight : prevTop);
     this.ensureChatScroll();
   }
   takeScrollPin() {
