@@ -147,31 +147,6 @@
       ]
     },
     {
-      "id": "meme",
-      "version": "0.2.1",
-      "name": "表情包工坊",
-      "author": "FelixTaXk",
-      "description": "需要先在本机安装 Python 和 Pillow。给图片加字幕、气泡或描边，成品可收藏到官方图库。商店会一并安装缺少的图库插件。",
-      "repository": "https://github.com/FelixTaXk/whalelife-community-meme",
-      "installation": "https://github.com/FelixTaXk/whalelife-community-meme/blob/main/README.md#安装",
-      "feedback": "https://github.com/FelixTaXk/whalelife-community-meme/issues",
-      "dependencies": ["gallery"],
-      "collected": "2026-11-21",
-      "stars": 0,
-      "verifiedReleases": [
-        {
-          "version": "0.2.1",
-          "hostRange": "0.1.0",
-          "platform": "win32",
-          "arch": "x64",
-          "assetUrl": "https://github.com/FelixTaXk/whalelife-community-meme/releases/download/v0.2.1/meme-0.2.1-win32-x64.wlpkg.gz",
-          "sizeBytes": 35776,
-          "sha256": "a31dcd82ac78de05de2c183140008768ccb82ef9b91d85b38dc33f36ba390faf",
-          "dependencies": {"gallery": "0.1.2"}
-        }
-      ]
-    },
-    {
       "id": "voice",
       "version": "0.13.1",
       "name": "语音模块",
