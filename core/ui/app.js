@@ -781,6 +781,7 @@ class ConsoleApp {
     if (!box) return;
     if (!this.state.messages.length) {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
+      this.ensureChatScroll();
       return;
     }
     box.innerHTML = this.state.messages
@@ -790,6 +791,100 @@ class ConsoleApp {
       )
       .join("");
     box.scrollTop = box.scrollHeight;
+    this.ensureChatScroll();
+  }
+  takeScrollPin() {
+    const pin = this.pendingScrollBottom === true;
+    this.pendingScrollBottom = false;
+    return pin;
+  }
+  /** 设定滚动位置；恢复原位置时不播动画。 */
+  setScrollTop(box, value, behavior) {
+    const max = Math.max(0, box.scrollHeight - box.clientHeight);
+    const top = Math.max(0, Math.min(value, max));
+    if (behavior === "smooth") {
+      box.scrollTo({ top, behavior: "smooth" });
+      return;
+    }
+    const previous = box.style.scrollBehavior;
+    box.style.scrollBehavior = "auto";
+    box.scrollTop = top;
+    box.style.scrollBehavior = previous;
+  }
+  /** 刻度轨与滚动监听只绑一次；页面重绘后元素换了也能重新绑上。 */
+  ensureChatScroll() {
+    const box = $("messages");
+    const rail = $("chat-ruler");
+    if (!box) return;
+    if (rail && rail.dataset.bound !== "1") {
+      rail.dataset.bound = "1";
+      rail.addEventListener("click", (event) => {
+        const tick = event.target.closest("[data-tick]");
+        const target = $("messages");
+        if (!tick || !target || !this.rulerStep) return;
+        const index = Number(tick.dataset.tick) || 0;
+        this.setScrollTop(target, index * this.rulerStep, "smooth");
+      });
+    }
+    if (box.dataset.scrollBound !== "1") {
+      box.dataset.scrollBound = "1";
+      // 只有真的动手滚过，才允许触顶自动翻页；否则初次加载就会一直往前翻。
+      const wake = () => {
+        this.chatScrolled = true;
+      };
+      box.addEventListener("wheel", wake, { passive: true });
+      box.addEventListener("touchmove", wake, { passive: true });
+      box.addEventListener("keydown", wake);
+      box.addEventListener(
+        "scroll",
+        () => {
+          this.updateRuler();
+          if (box.scrollTop <= 2 && this.chatScrolled && typeof this.loadOlder === 'function')
+            this.loadOlder();
+        },
+        { passive: true },
+      );
+    }
+    this.updateRuler();
+  }
+  updateRuler() {
+    const rail = $("chat-ruler");
+    const box = $("messages");
+    if (!rail || !box) return;
+    const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
+    const scrollable = box.scrollHeight - box.clientHeight;
+    const count =
+      scrollable < step * 0.6
+        ? 0
+        : Math.min(Math.ceil((scrollable + box.clientHeight) / step), 60);
+    if (!count) {
+      rail.hidden = true;
+      rail.innerHTML = "";
+      this.rulerStep = 0;
+      this.rulerCount = 0;
+      return;
+    }
+    if (this.rulerStep !== step || this.rulerCount !== count) {
+      this.rulerStep = step;
+      this.rulerCount = count;
+      const height = Math.max(box.clientHeight - 12, count * 6);
+      const parts = [];
+      for (let index = 0; index < count; index += 1) {
+        const ratio = count === 1 ? 0 : index / (count - 1);
+        parts.push(
+          `<button type="button" class="tick" data-tick="${index}" style="top:${(ratio * (height - 6)).toFixed(1)}px" aria-label="第 ${index + 1} 屏，共 ${count} 屏"></button>`,
+        );
+      }
+      rail.innerHTML = parts.join("");
+    }
+    rail.hidden = false;
+    const active = Math.max(
+      0,
+      Math.min(count - 1, Math.round(box.scrollTop / step)),
+    );
+    rail
+      .querySelectorAll(".tick")
+      .forEach((tick, index) => tick.classList.toggle("active", index === active));
   }
   filteredLogs() {
     return this.state.logs.filter(
