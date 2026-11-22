@@ -331,7 +331,7 @@ test("console config API persists model selection, protects secrets and changes 
     );
     assert.equal(requested.at(-1), "chat-b");
     assert.equal(
-      (await (await get("/api/session?id=console-test")).json()).length,
+      (await (await get("/api/session?id=console-test")).json()).items.length,
       2,
     );
     const pluginReply = await app.llm.chat({

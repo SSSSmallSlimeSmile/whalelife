@@ -427,8 +427,9 @@ class ConsoleApp {
     const sequence = ++this.sessionSync;
     const { id } = await api("/api/session/current", input ??
       (this.sessionReady ? undefined : { legacyId: localStorage.whaleSession }));
-    const [rows, choices] = await Promise.all([
-      api("/api/session?id=" + encodeURIComponent(id)), api("/api/session/list"),
+    const [page, choices] = await Promise.all([
+      api(`/api/session?id=${encodeURIComponent(id)}&limit=${SESSION_PAGE}`),
+      api("/api/session/list"),
     ]);
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
     this.sessionReady = true;
@@ -446,14 +447,13 @@ class ConsoleApp {
       this.state.memoryLoadedTab = null;
     }
     localStorage.whaleSession = id;
-    this.state.messages = rows
-      .filter((r) => r.type === "message")
-      .map((r) => ({
-        role: r.role,
-        text: r.text,
-        protocolOriginal: r.tool_protocol_original,
-        personaName: r.persona_name,
-      }));
+    this.state.messages = messageRows(page.items);
+    this.state.paging = {
+      total: page.total,
+      start: page.start,
+      end: page.end,
+      hasMore: page.hasMore,
+    };
   }
   async refreshSessionContext() {
     const id = this.state.session;
@@ -826,23 +826,25 @@ class ConsoleApp {
   }
   /** 设定滚动位置；恢复原位置时不播动画。 */
   setScrollTop(box, value, behavior) {
-    const max = Math.max(0, box.scrollHeight - box.clientHeight);
-    const top = Math.max(0, Math.min(value, max));
-    if (behavior === "smooth") {
+    const max = Math.max(0, (box.scrollHeight || 0) - (box.clientHeight || 0));
+    const top = Math.max(0, Math.min(Number(value) || 0, max));
+    if (behavior === "smooth" && typeof box.scrollTo === "function") {
       box.scrollTo({ top, behavior: "smooth" });
       return;
     }
-    const previous = box.style.scrollBehavior;
-    box.style.scrollBehavior = "auto";
+    // 恢复原位置时不能带平滑动画，否则会看着它慢慢滑回去。
+    const style = box.style;
+    const previous = style && style.scrollBehavior;
+    if (style) style.scrollBehavior = "auto";
     box.scrollTop = top;
-    box.style.scrollBehavior = previous;
+    if (style) style.scrollBehavior = previous;
   }
   /** 刻度轨与滚动监听只绑一次；页面重绘后元素换了也能重新绑上。 */
   ensureChatScroll() {
     const box = $("messages");
     const rail = $("chat-ruler");
     if (!box) return;
-    if (rail && rail.dataset.bound !== "1") {
+    if (rail && rail.dataset && rail.dataset.bound !== "1") {
       rail.dataset.bound = "1";
       rail.addEventListener("click", (event) => {
         const tick = event.target.closest("[data-tick]");
@@ -852,7 +854,7 @@ class ConsoleApp {
         this.setScrollTop(target, index * this.rulerStep, "smooth");
       });
     }
-    if (box.dataset.scrollBound !== "1") {
+    if (box.dataset && box.dataset.scrollBound !== "1") {
       box.dataset.scrollBound = "1";
       // 只有真的动手滚过，才允许触顶自动翻页；否则初次加载就会一直往前翻。
       const wake = () => {
@@ -877,6 +879,21 @@ class ConsoleApp {
     const rail = $("chat-ruler");
     const box = $("messages");
     if (!rail || !box) return;
+    // 轨和消息区必须是两个元素；万一同一个，宁可把轨关掉，也不能擦掉正文。
+    if (rail === box) {
+      rail.hidden = true;
+      this.rulerStep = 0;
+      this.rulerCount = 0;
+      return;
+    }
+    const viewport = box.clientHeight || 0;
+    if (!rail.dataset || !viewport) {
+      rail.hidden = true;
+      rail.innerHTML = "";
+      this.rulerStep = 0;
+      this.rulerCount = 0;
+      return;
+    }
     const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
     const scrollable = box.scrollHeight - box.clientHeight;
     const count =
@@ -912,6 +929,38 @@ class ConsoleApp {
       .querySelectorAll(".tick")
       .forEach((tick, index) => tick.classList.toggle("active", index === active));
   }
+  /** 滚到顶部时往前翻一页，翻完把阅读位置原样托住。 */
+  async loadOlder() {
+    const box = $("messages");
+    const paging = this.state.paging;
+    if (!box || !paging || !paging.hasMore || this.loadingOlder) return;
+    const id = this.state.session;
+    this.loadingOlder = true;
+    const prevHeight = box.scrollHeight;
+    const prevTop = box.scrollTop;
+    try {
+      const page = await api(
+        `/api/session?id=${encodeURIComponent(id)}&before=${paging.start}` +
+          `&limit=${SESSION_PAGE}`,
+      );
+      if (id !== this.state.session) return;
+      this.state.paging = {
+        total: page.total,
+        start: page.start,
+        end: page.end,
+        hasMore: page.hasMore,
+      };
+      const rows = messageRows(page.items);
+      if (!rows.length) return;
+      this.state.messages = rows.concat(this.state.messages);
+      this.renderMessages({ anchor: "keep" });
+      this.setScrollTop(box, box.scrollHeight - prevHeight + prevTop);
+    } catch (error) {
+      if (error.status !== 401) this.toast(error.message, true);
+    } finally {
+      this.loadingOlder = false;
+    }
+  }
   filteredLogs() {
     return this.state.logs.filter(
       (line) =>
@@ -936,5 +985,19 @@ class ConsoleApp {
       `显示 ${lines.length} / ${this.state.logs.length} 条 · ${this.logConnected ? "实时推送中" : "正在重新连接"}`;
   }
 }
+const SESSION_PAGE = 40;
+
+/** 会话行 → 气泡数组；首屏与续页共用一份映射。 */
+function messageRows(rows) {
+  return rows
+    .filter((row) => row.type === "message")
+    .map((row) => ({
+      role: row.role,
+      text: row.text,
+      protocolOriginal: row.tool_protocol_original,
+      personaName: row.persona_name,
+    }));
+}
+
 const app = new ConsoleApp();
 app.start();

@@ -529,9 +529,28 @@ export async function startWeb(config: any, services: any, runtime: any) {
         } finally { res.off("close", cancel); }
       }
       if (req.method === "GET" && req.url?.startsWith("/api/session?")) {
-        const id = new URL(req.url, origin).searchParams.get("id");
+        const params = new URL(req.url, origin).searchParams;
+        const id = params.get("id");
         if (!id) return send(400, { error: "请提供会话 ID" });
-        return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        const rows = conversationRows(await memory.readSession(id));
+        const asked = Number(params.get("limit"));
+        const limit =
+          Number.isFinite(asked) && asked > 0
+            ? Math.min(Math.floor(asked), 500)
+            : 40;
+        const before = Number(params.get("before"));
+        const end =
+          Number.isFinite(before) && before > 0
+            ? Math.min(Math.floor(before), rows.length)
+            : rows.length;
+        const start = Math.max(0, end - limit);
+        return send(200, {
+          items: rows.slice(start, end),
+          total: rows.length,
+          start,
+          end,
+          hasMore: start > 0,
+        });
       }
       if (req.method === "GET" && req.url === "/api/status")
         return send(200, {
