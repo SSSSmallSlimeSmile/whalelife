@@ -90,6 +90,67 @@ async function fixture(t: TestContext) {
   };
 }
 
+test("active persona changes split live turns while preserving accepted inputs, history and delivery retries", { timeout: 10000 }, async t => {
+  const f = await fixture(t), entered = deferred(), gate = f.gate();
+  await writeFile(join(f.root, "b.md"), "测试人格乙");
+  f.config.personas.b = { ...f.config.personas.a, name: "B", file: "b.md" };
+
+  const deliveries: string[] = [];
+  const handle = f.channels.register({
+    id: "mock", account: "following", personaMode: "active", permission: "off",
+    async send(outgoing) {
+      deliveries.push(outgoing.deliveryId);
+      if (deliveries.length === 1) throw Error("synthetic transport failure");
+    },
+  }, "turn-test");
+  const leader = message("original"), member = message("supplement"), next = message("next-persona");
+  await f.memory.saveSessionMeta("same-session", {});
+  await handle.bind(leader.peer, "same-session");
+  const toolCounts: number[] = [];
+  f.respond(async (input) => {
+    toolCounts.push(input.tools?.length ?? 0);
+    if (f.requests.length === 1) { entered.resolve(); await gate.promise; }
+    return answer(input.messages[0].content.includes("测试人格乙") ? "B的回复" : "A的回复");
+  });
+
+  const first = await open(handle, leader);
+  await entered.promise;
+  assert.equal((await first.append(member)).status, "accepted");
+  f.config.channels.web.persona = "b";
+  assert.equal(handle.currentPersona!(), "b");
+  assert.equal((await first.append(member)).status, "duplicate");
+  await rejects(() => first.append({ ...member, text: "不同正文" }), /不一致|不同正文/);
+  assert.equal((await first.append(next)).status, "closed");
+  const second = await open(handle, next);
+  assert.equal(second.sessionId, first.sessionId);
+  f.config.channels.web.persona = "a"; // The B turn already has its slot in this session's queue.
+  assert.equal((await first.append(message("after-switch-back"))).status, "closed");
+  gate.resolve();
+
+  const failed = await first.result(), completed = await second.result();
+  assert.deepEqual([failed.status, failed.text, completed.status, completed.text], ["delivery_failed", "A的回复", "sent", "B的回复"]);
+  assert.equal(f.requests.length, 3);
+  assert.match(JSON.stringify(f.requests[2]), /supplement/);
+  const third = await handle.receive(message("back-to-first"));
+  assert.deepEqual([third.status, third.text, third.sessionId], ["sent", "A的回复", first.sessionId]);
+  f.config.channels.web.persona = "b";
+  const retried = await handle.retry(leader.peer, member.messageId);
+  assert.deepEqual([retried.status, retried.text, retried.deliveryId], ["sent", "A的回复", failed.deliveryId]);
+  assert.equal((await handle.receive(member)).duplicate, true);
+  assert.deepEqual(deliveries, [failed.deliveryId, completed.deliveryId, third.deliveryId, failed.deliveryId]);
+  assert.deepEqual(toolCounts, [0, 0, 0, 0], "each turn keeps the channel's explicit tool permission");
+
+  const rows = await f.memory.readSession("same-session");
+  assert.deepEqual(rows.filter(row => row.type === "message" && row.role === "user").map(row => [row.external_message_id, row.persona_id]), [
+    ["original", "a"], ["supplement", "a"], ["next-persona", "b"], ["back-to-first", "a"],
+  ]);
+  assert.deepEqual(rows.filter(row => row.type === "message" && row.role === "assistant").map(row => row.persona_id), ["a", "b", "a"]);
+  const owners = new Map([["original", "a"], ["supplement", "a"], ["next-persona", "b"], ["back-to-first", "a"]]);
+  const receipts = rows.filter(row => row.type === "channel_receipt");
+  assert.deepEqual(new Set(receipts.map(row => row.external_message_id)), new Set(owners.keys()));
+  for (const receipt of receipts) assert.equal(receipt.persona_id, owners.get(receipt.external_message_id));
+});
+
 test("openTurn returns during generation; pending additions replace the candidate and retain individual source-bound history", { timeout: 10000 }, async t => {
   const f = await fixture(t), entered = deferred(), gate = f.gate();
   f.respond(async () => {

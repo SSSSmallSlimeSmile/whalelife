@@ -22,6 +22,15 @@ async function fixture(t: TestContext) {
       current: () => ctx.sessions.current(),
       create: (name) => ctx.sessions.create(name),
       run: (input) => ctx.sessions.run(input),
+      openChannelProbe: (account, options) => {
+        if (ctx.channels.supportsActivePersona !== true) throw Error('active persona unavailable');
+        const handle = ctx.channels.register({ id: 'probe', account, ...options, send: async () => {} });
+        return { read() {
+          const id = handle.currentPersona();
+          if (typeof id !== 'string') throw Error('expected synchronous persona ID');
+          return id;
+        }, dispose: () => handle.dispose() };
+      },
     });
   }`);
   await writeFile(join(root, "config/config.json"), JSON.stringify({
@@ -100,6 +109,35 @@ test("chat refresh and reload show escaped protocol source only in a collapsed d
     assert.match(source, /&lt;｜DSML｜invoke name=&quot;inspect_execution&quot;&gt;/);
     assert.doesNotMatch(html, /<b>|<｜DSML/);
   }
+});
+
+test("isolated channel plugin detects active persona and reads selection without binding a session", async t => {
+  const f = await fixture(t);
+  const indexFile = join(f.app.memory.root, "index.json");
+  const indexBefore = await readFile(indexFile, "utf8");
+  const probe = f.plugin();
+  f.app.config.channels.probe = { persona: "b" };
+  const following = await probe.openChannelProbe("following", { personaMode: "active" });
+  const fixed = await probe.openChannelProbe("fixed", { persona: "a" });
+  const configured = await probe.openChannelProbe("configured", {});
+  assert.equal(await following.read(), "a");
+  assert.equal(await configured.read(), "b");
+  await assert.rejects(async () => probe.openChannelProbe("conflict", { personaMode: "active", persona: "a" }));
+
+  for (const activePersona of ["b", "a"]) {
+    const config = await f.api("/api/model-config");
+    await f.api("/api/model-config", {
+      revision: config.revision, providers: config.providers, models: config.models, bindings: config.bindings,
+      personaModels: Object.fromEntries(config.personas.map((p: any) => [p.id, p.model])), activePersona,
+    });
+    assert.equal(await following.read(), activePersona);
+    assert.equal(await fixed.read(), "a");
+    assert.equal(await configured.read(), "b");
+  }
+  await following.dispose();
+  await assert.rejects(async () => following.read(), /停用/);
+  assert.equal(await readFile(indexFile, "utf8"), indexBefore, "reading persona left the session/route index untouched");
+  assert.equal(f.requests.length, 0);
 });
 
 test("concurrent current calls create only once; selection survives a host restart", async (t) => {

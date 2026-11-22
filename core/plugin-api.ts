@@ -244,6 +244,8 @@ export type IncomingMessageData = { peer: string; sender: string; senderProfile?
 export type OutgoingMessage = { channel: string; account: string; peer: string; sessionId: string; text: string; deliveryId: string; replyTo?: string; transient?: true };
 export type ChannelAdapter = {
   id: string; name?: string; account: string; persona?: string; permission?: Permission;
+  /** Follow the active host persona for each new turn. Mutually exclusive with persona. */
+  personaMode?: "active";
   send(message: OutgoingMessage, options: { signal: AbortSignal }): Promise<void>;
 };
 export type ChannelResult = {
@@ -268,6 +270,8 @@ export type SendMessage = { peer: string; messageId: string; text: string };
 export type RebindOptions = { expectedSessionId: string | null; sessionId?: string };
 export interface ChannelHandle {
   readonly supportsSenderProfile?: true;
+  /** Read the effective persona ID without creating a session or binding a peer. */
+  currentPersona?(): string;
   receive(message: IncomingMessageData, options?: ReceiveOptions): Promise<ChannelResult>;
   openTurn?(message: IncomingMessageData, options?: ReceiveOptions): Promise<ChannelTurn>;
   bind(peer: string, sessionId: string): Promise<string>;
@@ -278,6 +282,8 @@ export interface ChannelHandle {
   dispose(): void;
 }
 export interface ChannelAPI {
+  /** Check before registering an adapter with personaMode. */
+  readonly supportsActivePersona?: true;
   register(adapter: ChannelAdapter): ChannelHandle;
   send(target: SendMessage & { channel: string; account: string }, options?: ReceiveOptions): Promise<ChannelResult>;
 }

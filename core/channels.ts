@@ -46,6 +46,7 @@ export type ChannelAdapter = {
   name?: string;
   account: string;
   persona?: string;
+  personaMode?: "active";
   permission?: Permission;
   send(message: OutgoingMessage, options: { signal: AbortSignal }): Promise<void>;
 };
@@ -69,6 +70,7 @@ export type RebindOptions = {
 };
 export interface ChannelHandle {
   readonly supportsSenderProfile?: true;
+  currentPersona?(): string;
   receive(message: IncomingMessage, options?: ReceiveOptions): Promise<ChannelResult>;
   openTurn?(message: IncomingMessage, options?: ReceiveOptions): Promise<ChannelTurn>;
   bind(peer: string, sessionId: string): Promise<string>;
@@ -79,6 +81,7 @@ export interface ChannelHandle {
   dispose(): void;
 }
 export interface ChannelAPI {
+  readonly supportsActivePersona?: true;
   register(adapter: ChannelAdapter): ChannelHandle;
   send(target: SendMessage & { channel: string; account: string }, options?: ReceiveOptions): Promise<ChannelResult>;
 }
@@ -94,6 +97,8 @@ type Receipt = {
   external_message_id: string;
   direction: "in" | "out";
   fingerprint: string;
+  /** Persona at admission for an incoming message following the active persona. */
+  persona_id?: string;
   status: "pending" | "delivering" | ChannelResult["status"];
   delivery_id: string;
   text?: string;
@@ -165,10 +170,10 @@ export class Channels {
     signal?.throwIfAborted();
     if (this.sessions.memoryMaintenance) throw Error("记忆恢复中，请稍后重试");
   }
-  private policy(adapter: Pick<ChannelAdapter, "id" | "account" | "persona" | "permission">) {
+  private policy(adapter: Pick<ChannelAdapter, "id" | "account" | "persona" | "personaMode" | "permission">) {
     const channel = this.config.channels?.[adapter.id];
     const configured = channel?.accounts?.[adapter.account] ?? channel;
-    const persona = adapter.persona ?? configured?.persona;
+    const persona = adapter.personaMode === "active" ? this.config.channels?.web?.persona : (adapter.persona ?? configured?.persona);
     const item = this.config.personas?.[persona];
     if (typeof persona !== "string" || !Object.hasOwn(this.config.personas ?? {}, persona) || !item)
       throw Error("渠道必须配置有效人格");
@@ -459,6 +464,7 @@ export class Channels {
       let receipt: Receipt = {
         type: "channel_receipt", channel_key: key, external_message_id: messageId, direction,
         fingerprint, delivery_id: "delivery_" + hash([key, messageId, direction]), status: "pending",
+        ...(direction === "in" && reg.adapter.personaMode === "active" && { persona_id: route.persona }),
         ...(direction === "out" ? { conversation: { ...await this.sessions.outgoingIdentity(id, route),
           channel: route.channel, account: route.account, peer: route.peer, origin: route.origin } } : {}),
       };
@@ -489,7 +495,7 @@ export class Channels {
   }
   private validateInput(input: unknown) {
     if (!input || typeof input !== "object") throw Error("消息无效");
-    for (const key of ["persona", "permission", "session", "sessionId", "owner", "channel", "account", "origin", "platform", "action"])
+    for (const key of ["persona", "personaMode", "permission", "session", "sessionId", "owner", "channel", "account", "origin", "platform", "action"])
       if (Object.hasOwn(input, key)) throw Error("消息不能指定路由策略：" + key);
   }
   private turnMessage(input: IncomingMessage): IncomingMessage {
@@ -548,6 +554,7 @@ export class Channels {
         let receipt: Receipt = { type: "channel_receipt", channel_key: key, external_message_id: message.messageId,
           direction: "in", fingerprint, delivery_id: "delivery_" + hash([key, message.messageId, "in"]), status: "pending",
           group_id: groupId, input_text: message.text, input_sender: message.sender,
+          ...(reg.adapter.personaMode === "active" && { persona_id: route.persona }),
           ...(message.senderProfile && { input_sender_profile: message.senderProfile }), received_at: route.receivedAt };
         const reserved = await this.save(id, route, receipt, "reserve");
         if (reserved) {
@@ -591,6 +598,8 @@ export class Channels {
           id: groupId, sessionId: id,
           append: async (value: IncomingMessage): Promise<TurnAppendResult> => {
             const next = checkMember(value);
+            if (reg.adapter.personaMode === "active" && this.policy(reg.adapter).persona !== route.persona)
+              inbox.closeInput();
             const arrival = new Date().toISOString();
             return inbox.append({ messageId: next.messageId, text: next.text, senderProfile: next.senderProfile, receivedAt: arrival, timezone: route.timezone! }, async () => {
               this.alive(reg, route.signal);
@@ -604,6 +613,7 @@ export class Channels {
               const member: Receipt = { type: "channel_receipt", channel_key: key, external_message_id: next.messageId, direction: "in",
                 fingerprint: hash([next.sender, next.text]), delivery_id: receipt.delivery_id, status: "pending", group_id: groupId,
                 group_message_id: message.messageId, input_text: next.text, input_sender: next.sender,
+                ...(receipt.persona_id && { persona_id: receipt.persona_id }),
                 ...(next.senderProfile && { input_sender_profile: next.senderProfile }), received_at: arrival };
               let existing: StoredReceipt | undefined;
               try { existing = await this.save(id, route, member, "reserve"); }
@@ -645,12 +655,18 @@ export class Channels {
     identifier(adapter.account, "account");
     validateOrigin({ plugin: owner, ...(adapter.name === undefined ? {} : { platform: adapter.name }) });
     if (typeof adapter.send !== "function") throw Error("渠道需要 send 文本发送函数");
+    if (adapter.personaMode !== undefined && (adapter.personaMode !== "active" || adapter.persona !== undefined))
+      throw Error("渠道 personaMode 只支持 active，且不能同时指定固定 persona");
     this.policy(adapter);
     const key = this.registrationKey(adapter.id, adapter.account);
     if (this.registrations.has(key)) throw Error("渠道账号已注册");
     const reg = { adapter: { ...adapter }, owner, controller: new AbortController() } as Registration;
     const handle: ChannelHandle = {
       supportsSenderProfile: true,
+      currentPersona: () => {
+        this.alive(reg);
+        return this.policy(reg.adapter).persona;
+      },
       receive: (message, options = {}) => this.incoming(reg, message, options, "in"),
       openTurn: (message, options = {}) => this.openTurn(reg, message, options),
       send: (message, options = {}) => this.incoming(reg, message, options, "out"),
@@ -730,6 +746,7 @@ export class Channels {
     const guard = () => { if (!active) throw Error("插件渠道接口已停用"); };
     onDispose(() => { active = false; for (const handle of handles) handle.dispose(); });
     return {
+      supportsActivePersona: true,
       register: (adapter) => {
         guard();
         const handle = this.register(adapter, owner);
