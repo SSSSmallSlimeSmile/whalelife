@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
+import { parse } from "yaml";
 
-const { renderStore, loadStoreCatalog } = await import(new URL("../core/ui/plugin-store.js", import.meta.url).href);
+const { bindStore, renderStore, loadStoreCatalog } = await import(new URL("../core/ui/plugin-store.js", import.meta.url).href);
 const entry = (id: string) => ({
   id, name: id, description: "示例插件", author: "作者 <示例>",
   repository: "https://github.com/example/" + id, installation: "https://github.com/example/" + id + "#installation",
@@ -32,6 +33,40 @@ test("the native store keeps official order, sorts only community, and does not 
   assert.deepEqual(rows(officialOnly), ["zeta","alpha"]);
   assert.match(officialOnly, /class="store-sort" hidden/);
   assert.match(renderStore({ state: { storeView: "community", bundledStore: { official: [], community: [] } } }), /暂无收录的社区插件/);
+});
+
+test("both submission dialogs open the correct Issue form for each review queue", () => {
+  const submit: {onclick?: () => void} = {};
+  const root = {
+    querySelector: (selector: string) => selector === "[data-store-submit]" ? submit : selector === "[data-store-results]" ? {} : null,
+    querySelectorAll: () => [], addEventListener() {},
+  };
+  let modal = "";
+  bindStore({state:{bundledStore:bundled, communityPlugins:{}}, dialog: (_: string, html: string) => { modal = html; }},
+    {querySelector: () => root}, false);
+  assert.ok(submit.onclick);
+  submit.onclick();
+  const staticPage = readFileSync(new URL("../market/index.html", import.meta.url),"utf8");
+  for (const [file, prefix, required] of [
+    ["submit-plugin.yml","[收录]",["repository","package-url","introduction"]],
+    ["review-plugin-update.yml","[复审]",["repository","plugin-id","version","release-url","package-url"]],
+    ["review-plugin-icon.yml","[图标]",["repository","plugin-id","icon"]],
+  ] as const) {
+    const link = "https://github.com/iinukami/whalelife/issues/new?template=" + file;
+    for (const html of [modal,staticPage]) assert.ok(html.includes(`href="${link}"`), link);
+    const form = parse(readFileSync(new URL("../.github/ISSUE_TEMPLATE/" + file, import.meta.url),"utf8"));
+    assert.equal(form.title.trim(),prefix);
+    const fields: {id: string; attributes: {label: string}; validations: {required:boolean}}[] =
+      form.body.filter((item: {type:string}) => item.type !== "markdown");
+    assert.deepEqual(fields.filter(field => field.validations.required).map(field => field.id), required);
+    assert.equal(fields.find(field => field.id === "repository")?.attributes.label, "插件的公开 GitHub 仓库");
+    if (file === "review-plugin-update.yml") {
+      assert.equal(fields.find(field => field.id === "original-issue")?.validations.required,false);
+      assert.equal(fields.find(field => field.id === "plugin-id")?.attributes.label,"插件 ID");
+      assert.equal(fields.find(field => field.id === "version")?.attributes.label,"版本");
+      assert.equal(fields.find(field => field.id === "release-url")?.attributes.label,"Release 链接");
+    }
+  }
 });
 
 test("the drawer filters cards by official name, ID and author without changing the catalog", () => {

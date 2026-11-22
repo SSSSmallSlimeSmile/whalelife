@@ -1,0 +1,31 @@
+name: 更换社区插件图标
+description: 为已收录插件提交一张新图标，单独审图。
+title: "[图标] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请将标题补全为 `[图标] 插件名`。只换图标无需升版或重新打包。如果这款插件已有开放的图标审核帖，请在该帖补充图片链接。
+  - type: input
+    id: repository
+    attributes:
+      label: 插件的公开 GitHub 仓库
+      placeholder: https://github.com/作者/插件仓库
+    validations:
+      required: true
+  - type: input
+    id: plugin-id
+    attributes:
+      label: 插件 ID
+      description: 填写商店显示的完整运行 ID，例如 surf/douyin。
+      placeholder: my-plugin
+    validations:
+      required: true
+  - type: input
+    id: icon
+    attributes:
+      label: 插件图标链接
+      description: 请提供自己插件仓库里的 PNG，建议 256 × 256 像素，最大 1 MiB，每边不超过 1024 像素。
+      placeholder: https://github.com/作者/插件仓库/blob/main/icon.png
+    validations:
+      required: true

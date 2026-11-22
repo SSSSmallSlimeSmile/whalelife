@@ -1,0 +1,57 @@
+name: 提交社区插件新版复审
+description: 为已收录插件的新版正式发行包申请商店审核。
+title: "[复审] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请将标题补全为 `[复审] 插件名 v1.2.0`。发布正式 Release 后，每个新版本在 WhaleLife 主仓新开一帖。如果这款插件的同一版本已有开放的审核帖，请在该帖补充资料。
+
+        已发布的安装包如需修改，请先提高 `plugin.yaml` 的版本号，重新打包并发布对应的新 Release，再按新版本提交复审。首次投稿请用[收录申请](https://github.com/iinukami/whalelife/issues/new?template=submit-plugin.yml)。仅换图标请用[图标审核](https://github.com/iinukami/whalelife/issues/new?template=review-plugin-icon.yml)。
+  - type: input
+    id: repository
+    attributes:
+      label: 插件的公开 GitHub 仓库
+      placeholder: https://github.com/作者/插件仓库
+    validations:
+      required: true
+  - type: input
+    id: plugin-id
+    attributes:
+      label: 插件 ID
+      description: 填写商店显示的完整运行 ID。子插件要包含父插件 ID，例如 surf/douyin。
+      placeholder: my-plugin
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 填写本次发行包中 plugin.yaml 的版本号。
+      placeholder: 1.2.0
+    validations:
+      required: true
+  - type: input
+    id: release-url
+    attributes:
+      label: Release 链接
+      description: 填写本次正式发行页，发行说明请写明附件大小、SHA-256、适用环境和必需依赖。
+      placeholder: https://github.com/作者/插件仓库/releases/tag/v1.2.0
+    validations:
+      required: true
+  - type: input
+    id: package-url
+    attributes:
+      label: 正式发行包下载链接（.wlpkg.gz）
+      description: 复制上述 Release 中 .wlpkg.gz 附件的下载链接。
+      placeholder: https://github.com/作者/插件仓库/releases/download/v1.2.0/my-plugin-1.2.0.wlpkg.gz
+    validations:
+      required: true
+  - type: input
+    id: original-issue
+    attributes:
+      label: 原投稿链接（选填）
+      description: 如果方便，附上首次收录帖，便于查阅审核历史。
+      placeholder: https://github.com/iinukami/whalelife/issues/123
+    validations:
+      required: false

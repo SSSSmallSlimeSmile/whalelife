@@ -9,7 +9,9 @@ body:
 
         请在发行说明中列出附件字节数、SHA-256、适用的 WhaleLife 版本、系统、架构和必需插件版本。维护者会下载同一附件，在独立环境试装。[打包命令与格式说明](https://github.com/iinukami/whalelife/blob/main/market/community-packages.md#作者打包)
 
-        已经开帖但尚未提供安装包的投稿会保留待补件状态。请在原 Issue 补充附件链接，审核通过后收录。
+        已经开帖但尚未提供安装包的投稿会保留待补件状态。请在仍开放的投稿 Issue 补充附件链接。
+
+        已收录插件发新版后请在主仓[提交新版复审](https://github.com/iinukami/whalelife/issues/new?template=review-plugin-update.yml)；同一版本已有开放审核帖时在该帖补充资料。只换图标可[申请单独审图](https://github.com/iinukami/whalelife/issues/new?template=review-plugin-icon.yml)。
   - type: input
     id: repository
     attributes:

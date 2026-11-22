@@ -48,7 +48,7 @@ const readme = [
   table(catalog.official),
   "## 社区插件",
   community.length ? table(community) : "目前还没有收录的社区插件。",
-  "社区插件由原作者维护。首次[提交收录申请](https://github.com/iinukami/whalelife/issues/new?template=submit-plugin.yml)需填写公开仓库链接、正式 GitHub Release 的 `.wlpkg.gz` 附件下载链接和一句话介绍。缺包的投稿在原 Issue 待补件，补上并通过审核后收录。用户手动检查插件更新时，只提示适合本机的已审核新版。历史手动安装条目继续提供安装说明。[社区插件打包与审核说明](community-packages.md)",
+  "社区插件由原作者维护。首次[提交收录申请](https://github.com/iinukami/whalelife/issues/new?template=submit-plugin.yml)需填写公开仓库链接、正式 GitHub Release 的 `.wlpkg.gz` 附件下载链接和一句话介绍。缺包的投稿在原 Issue 待补件，补上并通过审核后收录。已收录插件发布新版后，由作者在主仓[提交新版复审](https://github.com/iinukami/whalelife/issues/new?template=review-plugin-update.yml)。同一版本已有开放审核帖时在该帖补充资料。只换图标可[申请单独审图](https://github.com/iinukami/whalelife/issues/new?template=review-plugin-icon.yml)。用户手动检查插件更新时，只提示适合本机的已审核新版。历史手动安装条目继续提供安装说明。[社区插件打包与审核说明](community-packages.md)",
   "<details>\n<summary>维护目录</summary>",
   "条目资料在 [catalog.json](catalog.json) 维护。在主仓根目录运行 `node market/tools/generate-catalog.mjs` 更新这个页面与随主干提供的离线快照。提交前运行 `node market/tools/generate-catalog.mjs --check` 检查生成物和[官方插件发行清单](official-releases.json)。",
   "商店显示条目的 `version`。提供一键安装的条目填写最新已审核发行包的版本，仅提供安装说明的条目可填写已核对的作者发布版本。暂无记录时省略该字段，商店会显示「版本未提供」。",
