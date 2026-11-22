@@ -846,7 +846,8 @@ main {
 .plugin-heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .plugin-check-status { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
 .plugin-check-status:empty { display: none; }
-#plugin-store .plugin-check-status { margin: 8px var(--store-gutter) 0; }
+#plugin-store > .plugin-check-status { margin: 8px var(--store-gutter) 0; }
+.store-detail-body .plugin-check-status { margin: 8px 0 0; }
 #store-drawer {
   --store-paper: #fcfbf8;
   --store-ink: #292636;

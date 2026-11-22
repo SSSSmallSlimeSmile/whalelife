@@ -42,6 +42,15 @@ const recognized = async () => ({ plugins: [{ runtimeId: "parent/child", install
   recognizedRuntimeIds: ["parent/child"] });
 const unrecognized = async () => ({ plugins: [], recognizedRuntimeIds: [] });
 
+test("an unavailable official inventory keeps other notices and reports an incomplete manual check", async t => {
+  serve(t, new Map<string, unknown>([[registryURL, registry], [catalogURL, catalog]]));
+  const service = make();
+  const result = await service.list(installed, async () => ({...await unrecognized(), incomplete:true}));
+  assert.deepEqual(result.updates.map(row => row.source), ["community"]);
+  assert.equal(result.incomplete, true);
+  assert.equal(service.snapshot(installed).incomplete, true);
+});
+
 function serve(t: TestContext, replies: Map<string, unknown>) {
   const requests: { address: string; init: RequestInit }[] = [];
   t.mock.method(globalThis, "fetch", async (address: string, init: RequestInit) => {

@@ -62,10 +62,11 @@ async function openAsset(source: URL, signal: AbortSignal): Promise<Response> {
 
 type Fingerprint = Pick<OfficialAsset, "sha256" | "sizeBytes">;
 type Populate = (write: (chunk: Uint8Array) => Promise<void>, cache: string) => Promise<void>;
+type CacheExtension = ".wlpkg.gz" | ".inventory.json";
 
-async function populateCache(root: string, asset: Fingerprint, populate: Populate) {
+async function populateCache(root: string, asset: Fingerprint, populate: Populate, extension: CacheExtension) {
   const cache = (await directoryAt(root, ".artifacts/official-packages", true))!;
-  const target = join(cache, asset.sha256 + ".wlpkg.gz");
+  const target = join(cache, asset.sha256 + extension);
   try {
     if (await digestFile(target, asset.sizeBytes) === asset.sha256) return;
   } catch (error) {
@@ -110,15 +111,16 @@ async function populateCache(root: string, asset: Fingerprint, populate: Populat
 }
 
 /** Publish verified bytes under their content address, or reuse an already verified cache entry. */
-export async function ensureCachedPackage(root: string, asset: Fingerprint, populate: Populate): Promise<void> {
+export async function ensureCachedPackage(root: string, asset: Fingerprint, populate: Populate,
+  extension: CacheExtension = ".wlpkg.gz"): Promise<void> {
   if (!/^[a-f0-9]{64}$/.test(asset.sha256) || !Number.isSafeInteger(asset.sizeBytes) || asset.sizeBytes <= 0) {
     throw Error("官方发行包大小或 SHA-256 无效。");
   }
   const host = resolve(root);
-  const key = join(host, asset.sha256);
+  const key = join(host, asset.sha256 + extension);
   const previous = pending.get(key);
   if (previous) return previous;
-  const work = populateCache(host, asset, populate);
+  const work = populateCache(host, asset, populate, extension);
   pending.set(key, work);
   try { await work; }
   finally { pending.delete(key); }

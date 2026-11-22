@@ -10,7 +10,7 @@ import { compatibleHostFloor } from "./package-host-range.ts";
 
 type Entry = { id: string; repository: string };
 type Installed = { id: string; version?: string; builtin?: boolean; repository?: unknown };
-type Recognition = { plugins: { runtimeId: string; installedVersion: string | null; installed: boolean }[]; recognizedRuntimeIds: string[] };
+type Recognition = { plugins: { runtimeId: string; installedVersion: string | null; installed: boolean }[]; recognizedRuntimeIds: string[]; incomplete?: boolean };
 type Notice = Entry & { runtimeId: string; source: "official" | "community"; installedVersion: string; latestVersion: string; url: string };
 type Target = { version: string; url: string };
 type Metadata = Record<string, any>;
@@ -132,6 +132,7 @@ export class PluginUpdates {
       if (officialVersions && !publicPlugins) { incomplete = true; return; }
       const recognition = await recognize(publicRegistry).catch(() => null);
       if (!recognition) { incomplete = true; return; }
+      if (recognition.incomplete) incomplete = true;
       const compatible = officialVersions && publicRegistry ? await officialVersions(publicRegistry,
         new Set(officialCandidates.map(row => row.id))).catch(() => null) : undefined;
       if (compatible === null) { incomplete = true; return; }

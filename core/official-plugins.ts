@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { inspectOfficialFiles, installOfficialFiles, replaceOfficialFiles, uninstallOfficialFiles } from "./official-package-files.ts";
-import { ensureOfficialPackage } from "./official-package-download.ts";
+import { ensureCachedPackage, ensureOfficialPackage } from "./official-package-download.ts";
 import { compareVersions as compare, compatibleHostFloor, stableVersion } from "./package-host-range.ts";
 import type { Runtime } from "./runtime.ts";
 import { readPackageInstalls, recordPackageInstalls, type CommunityInstallReceipt, type OfficialInstallReceipt } from "./community-install-receipts.ts";
@@ -18,7 +18,7 @@ export type PackageRelease = {
 };
 type Release = PackageRelease;
 export type PackageEntry = { id: string; name: string; repository: string; parentId: string | null; requiredPlugins: string[]; preserve?: string[]; verifiedReleases: Release[];
-  community?: boolean };
+  community?: boolean; readInventory?: (sha256: string) => Promise<Buffer> };
 type Entry = PackageEntry;
 type InstalledBuild = { runtimeId: string; version: string; platform: string; arch: string; sha256: string; sourceCommit: string };
 type Card = { id: string; description: string; installation: string };
@@ -27,7 +27,7 @@ type CommunityPolicy = {
   verify(root: string, entry: Entry, release: Release): Promise<void>;
 };
 type Step = { action: "install" | "enable" | "reuse" | "uninstall" | "update"; id: string; name: string; version: string };
-type Item = { entry: Entry; pathId: string; eligible: Release[]; target?: Release; existing?: Release; installedVersion?: string; installed: boolean; reason: string; enabled: boolean; active: boolean };
+type Item = { entry: Entry; pathId: string; eligible: Release[]; target?: Release; existing?: Release; installedVersion?: string; installed: boolean; reason: string; enabled: boolean; active: boolean; inventoryUnavailable?: boolean };
 const read = (file: string) => JSON.parse(readFileSync(new URL(file, import.meta.url), "utf8"));
 const registry: { plugins: Entry[]; installedBuilds?: InstalledBuild[] } = read("../market/official-releases.json");
 const cards: Card[] = read("../market/catalog.json").official;
@@ -146,11 +146,27 @@ export class PluginPackages {
     }
     for (const release of candidates) try {
       let candidate = release;
-      let inspection = await inspectOfficialFiles(runtime.root, inventorySpec(item, candidate));
-      if (candidate.inventorySha256 && inspection.state === "blocked" && inspection.reason?.includes("ENOENT")) {
-        // A package published after this host may only have its verified archive in the local cache.
-        candidate = {...candidate, inventorySha256: undefined};
-        inspection = await inspectOfficialFiles(runtime.root, spec(item, candidate));
+      const ownership = inventorySpec(item, release);
+      let inspection = await inspectOfficialFiles(runtime.root, ownership);
+      if (ownership.recognitionOnly && inspection.state === "blocked" && inspection.reason?.includes("ENOENT")) {
+        if (release.inventorySha256 && !release.recognitionOnly) {
+          candidate = {...release, inventorySha256: undefined};
+          inspection = await inspectOfficialFiles(runtime.root, spec(item, candidate));
+        }
+        // Only a reviewed update operation can provide a reader, and only an already installed
+        // version needs a remote inventory. Store it for confirmation and offline crash recovery.
+        if (record && entry.readInventory && (candidate === release || inspection.reason === "尚未取得已验证的发行包")) {
+          try {
+            const bytes = await entry.readInventory(ownership.sha256);
+            await ensureCachedPackage(runtime.root, {sha256:ownership.sha256, sizeBytes:bytes.length},
+              write => write(bytes), ".inventory.json");
+          } catch (error) {
+            item.inventoryUnavailable = true;
+            throw error;
+          }
+          candidate = release;
+          inspection = await inspectOfficialFiles(runtime.root, ownership);
+        }
       }
       if (updating && record && entry.community && candidate.assetUrl &&
           (receipt ? receipt.sha256 === candidate.sha256 : new Set(candidates.map(r => r.sha256)).size === 1) &&
@@ -385,7 +401,8 @@ export class PluginPackages {
         });
         if (files.state === "installed") recognized.add(build.runtimeId);
       }
-      return { plugins, recognizedRuntimeIds: [...recognized] };
+      const incomplete = [...items.values()].some(item => item.inventoryUnavailable && !recognized.has(item.pathId));
+      return { plugins, recognizedRuntimeIds: [...recognized], ...(incomplete && {incomplete:true}) };
     });
   }
   async apply(input: { id?: unknown; action?: unknown; version?: unknown; planKey?: unknown }) {

@@ -108,6 +108,7 @@ function detail(state, catalog) {
   const local = officialEntry && bundledIdentity(state, entry);
   const plan = localPlan(state, entry, !!officialEntry);
   const update = storeUpdate(state, entry, officialEntry ? "official" : "community");
+  const installed = (officialEntry ? plan?.installed : plan?.action === "installed") || !!update;
   const hasCommunityPackages = !officialEntry && Array.isArray(entry.verifiedReleases) && entry.verifiedReleases.length > 0;
   const action = update ? `<span class="store-action">${updateButton(state, entry, update)}</span>` : local
     ? `<span class="store-action" data-official-store-slot="${e(entry.id)}">${renderStoreInstall(state, entry.id)}</span>`
@@ -126,7 +127,8 @@ function detail(state, catalog) {
       <dl class="store-facts"><div><dt>作者</dt><dd>${e(entry.author)}</dd></div>
         <div><dt>插件依赖</dt><dd>${e(dependencies || "无")}</dd></div></dl>
       ${updateDetails(update)}
-      <div class="store-actions">${action}</div>
+      <div class="store-actions${installed ? " store-action" : ""}">${action}${installed ? checkPluginsButton(state) : ""}</div>
+      ${installed ? checkPluginsStatus(state) : ""}
       <nav class="store-links" aria-label="${e(entry.name)}相关链接">${links}</nav></div>`;
 }
 
@@ -277,6 +279,7 @@ export function bindStore(app, container = app.content, opening = true) {
     if (sort) sort.closest("label").hidden = current === "official" || !(catalog?.community.length > 1);
     listing.innerHTML = storeBody(state);
     bindCommunityImages(root);
+    if (state.storeDetail) bindPluginUpdateCheck(app, root);
     if (focusedUpdate) {
       const button = [...listing.querySelectorAll("[data-plugin-update]:enabled")].find(el => el.dataset.pluginUpdate === focusedUpdate)
         || [...listing.querySelectorAll("[data-store-entry]")].find(el => el.dataset.storeEntry === focusedUpdate);
@@ -285,6 +288,7 @@ export function bindStore(app, container = app.content, opening = true) {
       [...listing.querySelectorAll("[data-store-entry]")].find(el => el.dataset.storeEntry === focusedId)?.focus({ preventScroll: true });
     } else if (focusedDetail) {
       const next = active.matches("a") ? [...listing.querySelectorAll("a")].find(link => link.href === active.href)
+        : active.hasAttribute("data-check-plugin-updates") ? listing.querySelector("[data-check-plugin-updates]:enabled")
         : active.hasAttribute("data-official-action") ? listing.querySelector("[data-official-action]:enabled")
         : active.hasAttribute("data-community-install") ? listing.querySelector("[data-community-install]:enabled") : null;
       (next || listing.querySelector("#store-heading"))?.focus({ preventScroll: true });

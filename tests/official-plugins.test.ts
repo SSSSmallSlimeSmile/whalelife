@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { Runtime } from "../core/runtime.ts";
 import { OfficialPlugins } from "../core/official-plugins.ts";
+import { officialUpdateEntries } from "../core/official-update-registry.ts";
 import { recordCommunityInstalls } from "../core/community-install-receipts.ts";
 import {beginUpdateDependencies, recoverUpdateDependencies} from "../core/package-update-journal.ts";
 import {installOfficialFiles} from "../core/official-package-files.ts";
@@ -44,6 +45,59 @@ async function fixture(t: TestContext, broken = false, required = "1.0.0", paren
   const apply = async (id: string) => manager.apply(await get(id));
   return { root, runtime, manager, get, apply, create, createParent, parentFiles: parent.files, packages: [parent, child] };
 }
+
+test("a clean old host can update a manually installed official build using only its published historical inventory", async t => {
+  const f = await fixture(t);
+  const original = f.packages[0], next = await f.createParent("1.1.0");
+  const path = join(f.root, "plugins/surf");
+  await mkdir(path, {recursive:true});
+  for (const file of original.files) await writeFile(join(path,file.path), file.bytes);
+  await unlink(join(f.root, ".artifacts/official-packages", original.entry.verifiedReleases[0].sha256 + ".wlpkg.gz"));
+  await f.runtime.scan();
+  const historical = { ...original.entry.verifiedReleases[0], recognitionOnly:true, delivery:"inventory",
+    sha256:hash(original.inventory), inventoryPath:"market/inventories/" + hash(original.inventory) + ".json",
+    sourceCommit:"c".repeat(40), sizeBytes:original.inventory.length, fileCount:original.files.length };
+  const target = {...next.entry.verifiedReleases[0], delivery:"github-release", inventorySha256:hash(next.inventory),
+    assetUrl:next.entry.repository+"/releases/download/v1.1.0/surf.wlpkg.gz", sizeBytes:next.packed.length};
+  const local = [{...original.entry, verifiedReleases:[]}];
+  const registry = {schemaVersion:1, plugins:[{...original.entry, verifiedReleases:[target,historical,
+    {...historical, version:"0.9.0"}, {...historical, platform:"unused"}]}]};
+  const make = (approvals = registry) => new OfficialPlugins(f.runtime, officialUpdateEntries(approvals,local,new AbortController().signal), []);
+  let online = false, requests = 0;
+  t.mock.method(globalThis,"fetch",async (url: string) => {
+    requests++;
+    assert.equal(url,"https://raw.githubusercontent.com/iinukami/whalelife/main/"+historical.inventoryPath);
+    return online ? new Response(original.inventory) : new Response(null,{status:503});
+  });
+  const offline = new OfficialPlugins(f.runtime, local, []);
+  assert.deepEqual((await offline.list()).recognizedRuntimeIds, []);
+  assert.equal(requests, 0);
+  const failed = make();
+  assert.equal((await failed.list()).incomplete, true);
+  await failed.compatibleUpdateVersions(new Set(["surf"]));
+  assert.equal(requests, 1);
+  online = true;
+  const manager = make();
+  assert.deepEqual((await manager.list()).recognizedRuntimeIds, ["surf"]);
+  assert.equal((await manager.compatibleUpdateVersions(new Set(["surf"]))).get("surf"), "1.1.0");
+  const plan = await make().updatePlan("surf","1.1.0");
+  assert.equal(plan.action,"update");
+  assert.equal(requests, 2);
+  const withdrawn = make({schemaVersion:1, plugins:[{...registry.plugins[0], verifiedReleases:[historical]}]});
+  await assert.rejects(withdrawn.apply(plan));
+  await writeFile(join(path,"extra.ts"),"user program");
+  await assert.rejects(make().apply(plan));
+  await unlink(join(path,"extra.ts"));
+  await writeFile(join(path,"index.ts"),"changed program");
+  assert.deepEqual((await make().list()).recognizedRuntimeIds, []);
+  await assert.rejects(make().apply(plan));
+  await writeFile(join(path,"index.ts"),original.files[1].bytes);
+  await writeFile(join(path,"settings.json"),'{"theme":"dark"}');
+  await make().apply(plan);
+  assert.equal(f.runtime.records.get("surf")?.manifest.version,"1.1.0");
+  assert.equal(await readFile(join(path,"settings.json"),"utf8"),'{"theme":"dark"}');
+  assert.equal(requests, 2);
+});
 
 test("confirmed update previews missing dependencies, serializes concurrent requests and keeps a stopped target stopped", async t => {
   const f = await fixture(t);

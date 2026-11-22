@@ -10,6 +10,22 @@ const release = (version: string) => ({ version, hostRange:"0.1.0", platform:"wi
 const local = { id:"demo", name:"Demo", repository, parentId:null, requiredPlugins:[], verifiedReleases:[release("1.0.0")] };
 const published = {...local, verifiedReleases:[release("1.1.0")]};
 
+test("published historical variants confer ownership only and must pin an inventory for the registered plugin", () => {
+  const sha256 = "d".repeat(64);
+  const historical = {version:"0.9.0", platform:"win32", arch:"x64", hostRange:"0.1.0", dependencies:{},
+    delivery:"inventory", recognitionOnly:true, sha256, sizeBytes:500, fileCount:2, sourceCommit:"c".repeat(40),
+    inventoryPath:"market/inventories/" + sha256 + ".json"};
+  const resolve = (row: unknown) => officialUpdateEntries({schemaVersion:1,
+    plugins:[{...published, verifiedReleases:[row]}]},[local])[0].verifiedReleases;
+  const history = resolve({...historical, assetUrl:repository+"/releases/download/v0.9.0/demo.wlpkg.gz"});
+  assert.ok(history.every(r => r.recognitionOnly));
+  assert.equal(history.find(r => r.sha256 === sha256)?.assetUrl, undefined);
+  for (const change of [{recognitionOnly:false}, {delivery:"github-release"}, {inventoryPath:"../foreign.json"},
+    {sha256:[sha256]}, {version:"latest"}, {hostRange:"*"}, {platform:["win32"]}, {arch:{}},
+    {sizeBytes:-1}, {fileCount:0}, {sourceCommit:"main"}, {dependencies:{other:"1.0.0"}}, {bundledPluginIds:["other/child"]}])
+    assert.throws(() => resolve({...historical,...change}), /审核资料无效/);
+});
+
 test("current main authorizes official target bytes and the shipped inventory can still identify an old install", () => {
   const resolved = (plugins: unknown[]) => officialUpdateEntries({schemaVersion:1,plugins},[local])[0].verifiedReleases;
   assert.deepEqual(resolved([published]).filter(r=>!r.recognitionOnly).map(r=>r.version),["1.1.0"]);

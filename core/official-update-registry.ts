@@ -49,14 +49,27 @@ export async function readOfficialInventory(sha256: string, signal: AbortSignal)
 
 function validAsset(asset: any, repo: string) {
   return asset && asset.repository === repo && typeof asset.assetUrl === "string" &&
-    asset.assetUrl.startsWith(repo + "/releases/download/") && digest.test(asset.sha256) &&
+    asset.assetUrl.startsWith(repo + "/releases/download/") && typeof asset.sha256 === "string" && digest.test(asset.sha256) &&
     Number.isSafeInteger(asset.sizeBytes) && asset.sizeBytes > 0 && asset.sizeBytes <= 2 * 1024 ** 3;
 }
 
 /** Only the maintainer's current published approvals may authorize a replacement. Local
  * historical inventories remain useful to prove ownership of the version being replaced. */
-export function officialUpdateEntries(registry: any, known = local.plugins): PackageEntry[] {
+export function officialUpdateEntries(registry: any, known = local.plugins, signal?: AbortSignal): PackageEntry[] {
   if (registry?.schemaVersion !== 1 || !Array.isArray(registry.plugins)) throw Error("官方发行清单格式无效。");
+  // One manual operation may inspect the same version for recognition and dependency planning.
+  // Different inventories share one download slot. A later click gets a fresh retry after a failure.
+  const reads = new Map<string, Promise<Buffer>>();
+  let previous = Promise.resolve();
+  const readInventory = signal && ((sha256: string) => {
+    let result = reads.get(sha256);
+    if (!result) {
+      result = previous.then(() => readOfficialInventory(sha256, signal));
+      reads.set(sha256, result);
+      previous = result.then(() => { reads.delete(sha256); }, () => {});
+    }
+    return result;
+  });
   return known.map(entry => {
     const matches = registry.plugins.filter((p: any) => p?.id === entry.id);
     const remote = matches[0];
@@ -69,21 +82,42 @@ export function officialUpdateEntries(registry: any, known = local.plugins): Pac
         !Array.isArray(remote.verifiedReleases) || remote.verifiedReleases.length > 512)
       throw Error("官方插件归属或依赖清单无效：" + entry.id);
     const releases: PackageRelease[] = [], targets = new Set<string>();
+    const seenInventory = new Set<string>();
     for (const r of remote.verifiedReleases) {
-      if (!r || r.recognitionOnly || r.delivery !== "github-release") continue;
+      if (!r || (!r.recognitionOnly && r.delivery !== "github-release" && r.delivery !== "inventory")) continue;
+      const scope = (entry.parentId ? entry.parentId + "/" : "") + entry.id + "/";
+      if (!stableVersion(r.version) || !parseHostRange(r.hostRange) ||
+          typeof r.platform !== "string" || !/^[a-z0-9]{1,16}$/.test(r.platform) ||
+          typeof r.arch !== "string" || !/^[a-z0-9]{1,16}$/.test(r.arch) ||
+          !Array.isArray(r.bundledPluginIds ?? []) || !(r.bundledPluginIds ?? []).every((id: unknown) =>
+            validPluginId(id) && id.startsWith(scope)) ||
+          !r.dependencies || typeof r.dependencies !== "object" || Array.isArray(r.dependencies) ||
+          !Object.entries(r.dependencies).every(([id,v]) => known.some(e => e.id === id && id !== entry.id) && stableVersion(v)))
+        throw Error("官方发行包审核资料无效：" + entry.id);
+      if (r.recognitionOnly || r.delivery === "inventory") {
+        if (r.recognitionOnly !== true || r.delivery !== "inventory" || typeof r.sha256 !== "string" || !digest.test(r.sha256) ||
+            r.inventoryPath !== "market/inventories/" + r.sha256 + ".json" ||
+            !Number.isSafeInteger(r.sizeBytes) || r.sizeBytes < 1 || r.sizeBytes > 32 * 1024 ** 2 ||
+            !Number.isSafeInteger(r.fileCount) || r.fileCount < 1 || r.fileCount > 150_000 ||
+            typeof r.sourceCommit !== "string" || !/^[a-f0-9]{40}$/.test(r.sourceCommit))
+          throw Error("官方历史文件清单审核资料无效：" + entry.id);
+        const key = JSON.stringify([r.version,r.platform,r.arch,r.sha256]);
+        if (!seenInventory.has(key)) {
+          seenInventory.add(key);
+          releases.push({version:r.version, hostRange:r.hostRange, platform:r.platform, arch:r.arch,
+            dependencies:r.dependencies, bundledPluginIds:r.bundledPluginIds, sha256:r.sha256, recognitionOnly:true});
+        }
+        continue;
+      }
       const asset = r.composition?.packagePart ?? { ...r, repository: entry.repository };
       const prefix = entry.repository + "/releases/download/v" + r.version + "/";
       const hostRange = parseHostRange(r.hostRange);
-      if (!stableVersion(r.version) || !hostRange || !digest.test(r.inventorySha256) ||
+      if (!hostRange || typeof r.inventorySha256 !== "string" || !digest.test(r.inventorySha256) ||
           !validAsset(asset, entry.repository) || !asset.assetUrl.startsWith(prefix) ||
           !/^[\w.+-]+\.wlpkg\.gz$/.test(asset.assetUrl.slice(prefix.length)) ||
-          !digest.test(r.sha256) || !Number.isSafeInteger(r.sizeBytes) || r.sizeBytes < 1 || r.sizeBytes > 2 * 1024 ** 3 ||
-          !Array.isArray(r.bundledPluginIds ?? []) || !(r.bundledPluginIds ?? []).every((id: unknown) =>
-            validPluginId(id) && id.startsWith((entry.parentId ? entry.parentId + "/" : "") + entry.id + "/")) ||
-          !r.dependencies || typeof r.dependencies !== "object" || Array.isArray(r.dependencies) ||
+          typeof r.sha256 !== "string" || !digest.test(r.sha256) || !Number.isSafeInteger(r.sizeBytes) || r.sizeBytes < 1 || r.sizeBytes > 2 * 1024 ** 3 ||
           !remote.requiredPlugins.every((id: string) => Object.hasOwn(r.dependencies,id)) ||
-          Object.keys(r.dependencies).length !== remote.requiredPlugins.length ||
-          !Object.entries(r.dependencies).every(([id,v]) => known.some(e => e.id === id) && stableVersion(v)))
+          Object.keys(r.dependencies).length !== remote.requiredPlugins.length)
         throw Error("官方发行包审核资料无效：" + entry.id);
       if (r.composition) {
         const zip = r.composition.zipPart;
@@ -97,12 +131,13 @@ export function officialUpdateEntries(registry: any, known = local.plugins): Pac
       releases.push(r);
     }
     return { ...entry, requiredPlugins: remote.requiredPlugins, preserve: [...new Set<string>([...(entry.preserve ?? []), ...(remote.preserve ?? [])])],
-      verifiedReleases: [...releases, ...history] };
+      readInventory,
+      verifiedReleases: [...releases, ...history.filter(r => !seenInventory.has(JSON.stringify([r.version,r.platform,r.arch,r.sha256])))] };
   });
 }
 
 export async function readOfficialUpdateEntries(signal: AbortSignal) {
-  return officialUpdateEntries(await readOfficialRegistry(signal));
+  return officialUpdateEntries(await readOfficialRegistry(signal), local.plugins, signal);
 }
 
 export async function readOfficialRegistry(signal: AbortSignal): Promise<Record<string, any>> {

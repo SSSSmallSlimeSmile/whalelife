@@ -58,6 +58,56 @@ test("a stale notice cannot attach to a changed local install or a different sto
   assert.doesNotMatch(renderStore({ state: { ...state, publishedStore: transferred, storeDetail: note.id } }), /有更新|查看新版/);
 });
 
+test("only installed plugin details offer the shared check before any update is known", () => {
+  const initial = { ...state, pluginUpdates: [], communityPlugins: [{ ...note, action: "installed", version: "1.2.0" }] };
+  for (const plugin of [gallery, note]) {
+    const detail = renderStore({ state: { ...initial, storeDetail: plugin.id } });
+    assert.equal(detail.match(/data-check-plugin-updates/g)?.length, 1);
+    assert.match(detail, /data-plugin-check-status/);
+    assert.doesNotMatch(detail, /data-plugin-update=/);
+  }
+  const uninstalled = { ...initial, officialPlugins: [], communityPlugins: [] };
+  for (const plugin of [gallery, note]) {
+    assert.doesNotMatch(renderStore({ state: { ...uninstalled, storeDetail: plugin.id } }),
+      /data-check-plugin-updates|data-plugin-check-status/);
+  }
+});
+
+test("a detail check still works after the installed plan arrives and only checks on click", async t => {
+  const paths: string[] = [];
+  t.mock.method(globalThis, "fetch", async (path: string, init: RequestInit) => {
+    paths.push(path);
+    if (path === "/api/plugin-updates") return Response.json({ updates: [], checked: false });
+    assert.equal(init.method, "POST");
+    return Response.json({ updates: [state.pluginUpdates[2]] });
+  });
+  const plan = { ...note, action: "install", version: "1.2.0", planKey: "plan" };
+  const current = { ...state, storeDetail: note.id, communityPlugins: [plan], pluginUpdates: [] };
+  let button: { onclick?: () => Promise<void> } | undefined;
+  let html = "";
+  const listing = { contains: () => false, set innerHTML(value: string) {
+    html = value;
+    button = html.includes("data-check-plugin-updates") ? {} : undefined;
+  } };
+  const doc = { getElementById: () => root, activeElement: null };
+  const root = Object.assign(new EventTarget(), { isConnected: true, ownerDocument: doc,
+    querySelector: (selector: string) => selector === "[data-store-results]" ? listing : null,
+    querySelectorAll: (selector: string) => selector === "[data-check-plugin-updates]" && button ? [button] : [] });
+  const content = { ownerDocument: doc, querySelector: () => root, querySelectorAll: () => [] };
+  const app = { state: current, content };
+  listing.innerHTML = renderStore(app);
+  bindStore(app, content, false);
+  plan.action = "installed";
+  root.dispatchEvent(new Event("community-plans"));
+  await nextTurn();
+  assert.deepEqual(paths, ["/api/plugin-updates"]);
+  assert.ok(button?.onclick);
+  await button.onclick();
+  assert.deepEqual(paths, ["/api/plugin-updates", "/api/plugin-updates/check"]);
+  assert.match(html, /更新到 v1\.10\.0<\/button>/);
+  assert.match(html, /发现 1 个插件可更新/);
+});
+
 test("official and community store updates preview dependencies and post only the confirmed version and plan", async t => {
   const posts: {path: string; data: any}[] = [];
   let blocked = false, fail = false;

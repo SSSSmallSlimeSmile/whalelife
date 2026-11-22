@@ -190,8 +190,17 @@ async function releaseAt(root: string, spec: OfficialPackageSpec) {
   if (!/^plugins\/[a-z][a-z0-9-]*(?:\/sub\/[a-z][a-z0-9-]*)*$/.test(spec.directory) || !hashPattern.test(spec.sha256) ||
       spec.preserve?.some(path => !safePath(path))) throw Error("官方插件目录或摘要无效");
   if (spec.recognitionOnly) {
-    const archive = fileURLToPath(new URL("../market/inventories/" + spec.sha256 + ".json", import.meta.url));
-    const stamp = (await fileStamp(archive)).key;
+    let archive = fileURLToPath(new URL("../market/inventories/" + spec.sha256 + ".json", import.meta.url));
+    let stamp: string;
+    try { stamp = (await fileStamp(archive)).key; }
+    catch (error) {
+      if (!missing(error)) throw error;
+      const cache = await directoryAt(root, ".artifacts/official-packages");
+      if (!cache) throw error;
+      // A manual update check may have saved a newer inventory here. Recovery can use it offline.
+      archive = join(cache, spec.sha256 + ".inventory.json");
+      stamp = (await fileStamp(archive)).key;
+    }
     let entry = metadata.get(archive);
     if (entry?.stamp !== stamp) {
       const bytes = await readFile(archive);

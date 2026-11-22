@@ -61,7 +61,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
     }
     const needsOfficial = [...ids].some(usesOfficial);
     return new CommunityPackages(runtime, reviews, !needsOfficial ? undefined :
-      registry ? officialUpdateEntries(registry) : await readOfficialUpdateEntries(lifetime.signal));
+      registry ? officialUpdateEntries(registry, undefined, lifetime.signal) : await readOfficialUpdateEntries(lifetime.signal));
   }
   const pluginUpdates = new PluginUpdates(lifetime.signal, async (reviews, ids, registry) =>
     (await reviewedUpdateManager(reviews, ids, registry)).compatibleUpdateVersions(ids));
@@ -246,9 +246,11 @@ export async function startWeb(config: any, services: any, runtime: any) {
         if (req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json")
           return send(415, { error: "请使用 JSON 提交操作。" });
         await body(req, 4096);
-        return send(200, await pluginUpdates.list(runtime.list(), registry => registry
-          ? new OfficialPlugins(runtime, officialUpdateEntries(registry)).list() : officialList(true),
-          (registry, ids) => new OfficialPlugins(runtime, officialUpdateEntries(registry)).compatibleUpdateVersions(ids)));
+        let officialUpdates: OfficialPlugins | undefined;
+        const reviewed = (registry: Record<string, any>) =>
+          officialUpdates ??= new OfficialPlugins(runtime, officialUpdateEntries(registry, undefined, lifetime.signal));
+        return send(200, await pluginUpdates.list(runtime.list(), registry => registry ? reviewed(registry).list() : officialList(true),
+          (registry, ids) => reviewed(registry).compatibleUpdateVersions(ids)));
       }
       if (req.method === "POST" && (pathname === "/api/plugin-updates/preview" || pathname === "/api/plugin-updates/apply")) {
         if (req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json")
