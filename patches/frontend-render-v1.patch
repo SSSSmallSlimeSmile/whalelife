@@ -1,0 +1,605 @@
+diff --git a/core/ui/app.js b/core/ui/app.js
+index 0092996..4a13bd9 100644
+--- a/core/ui/app.js
++++ b/core/ui/app.js
+@@ -4,6 +4,7 @@
+  */
+ import { api, escapeHTML as e, availableModels } from "./api.js";
+ import { icon, whale } from "./icons.js";
++import { renderRich, detailsState, applyDetailsState, hasVisibleText, avatarLabel } from "./rich.js";
+ import { renderModels, bindModels } from "./models.js";
+ import { renderPersonas, bindPersonas } from "./personas.js";
+ import { renderMemory, bindMemory, loadMemory } from "./memory.js";
+@@ -642,7 +643,8 @@ class ConsoleApp {
+         return;
+       }
+       if (data.type === "chunk") {
+-        if (!this.reply) {
++        const created = !this.reply;
++        if (created) {
+           this.reply = {
+             role: "assistant",
+             text: "",
+@@ -651,7 +653,13 @@ class ConsoleApp {
+           this.state.messages.push(this.reply);
+         }
+         this.reply.text += data.text;
+-      } else if (data.type === "done" || data.type === "error") {
++        if (this.state.page === "chat") {
++          if (created) this.renderMessages();
++          else this.updateStreamingReply();
++        }
++        return;
++      }
++      if (data.type === "done" || data.type === "error") {
+         if (data.type === "error") {
+           this.state.messages.push({ role: "error", text: data.error });
+           this.toast(data.error, true);
+@@ -775,6 +783,10 @@ class ConsoleApp {
+       this.updateChatControls();
+     }
+   }
++  /** 回复里已经有可见文字，才让它占一个气泡。 */
++  replyVisible() {
++    return hasVisibleText(this.reply && this.reply.text);
++  }
+   renderMessages() {
+     const personaName = this.state.status.personaName || "助手";
+     const box = $("messages");
+@@ -783,14 +795,37 @@ class ConsoleApp {
+       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
+       return;
+     }
+-    box.innerHTML = this.state.messages
+-      .map(
+-        (m) =>
+-          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
+-      )
+-      .join("");
++    const open = detailsState(box);
++    const parts = [];
++    this.state.messages.forEach((m, index) => {
++      if (m === this.reply && !this.replyVisible()) return;
++      parts.push(
++        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
++      );
++    });
++    box.innerHTML = parts.join("");
++    applyDetailsState(box, open);
++    if (this.state.chatBusy && !this.replyVisible())
++      box.insertAdjacentHTML(
++        "beforeend",
++        `<div class="message" data-thinking="1"><span class="mini-avatar" title="${e(personaName)}">${e(avatarLabel(personaName))}</span><div class="bubble thinking"><i></i><i></i><i></i><span>思考中 <em class="think-face">${pickThinkingFace()}</em></span></div></div>`,
++      );
+     box.scrollTop = box.scrollHeight;
+   }
++  /** 流式分片只重画当前那条回复，旧消息和它们的展开状态都不动。 */
++  updateStreamingReply() {
++    const box = $("messages");
++    if (!box || !this.replyVisible()) return;
++    const bubble = box.querySelector('.message[data-streaming="1"] .bubble');
++    if (!bubble) {
++      this.renderMessages();
++      return;
++    }
++    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
++    bubble.innerHTML = renderRich(this.reply.text);
++    box.querySelector('.message[data-thinking="1"]')?.remove();
++    if (nearBottom) box.scrollTop = box.scrollHeight;
++  }
+   filteredLogs() {
+     return this.state.logs.filter(
+       (line) =>
+@@ -815,5 +850,10 @@ class ConsoleApp {
+       `显示 ${lines.length} / ${this.state.logs.length} 条 · ${this.logConnected ? "实时推送中" : "正在重新连接"}`;
+   }
+ }
++const thinkingFaces = ["(｡•ᴗ•｡)","(´｡• ᵕ •｡`)","(๑•̀ㅂ•́)و","(￣▽￣)","(＝ω＝)","(っ˘ω˘ς)","(๑´ω`๑)","(・ω・)","(๑•́ ₃ •̀๑)","( ˘ω˘ )","(´▽`)","(･ω･)ﾉ"];
++const pickThinkingFace = () => thinkingFaces[Math.floor(Math.random() * thinkingFaces.length)];
++
++/** 每条回复旁的「念」按钮：交给嘴巴插件合成并播放。 */
++
+ const app = new ConsoleApp();
+ app.start();
+diff --git a/core/ui/rich.js b/core/ui/rich.js
+new file mode 100644
+index 0000000..0908fd2
+--- /dev/null
++++ b/core/ui/rich.js
+@@ -0,0 +1,245 @@
++/*! Copyright (c) 2026 iinukami and contributors.
++ * SPDX-License-Identifier: AGPL-3.0-only
++ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
++ */
++import { escapeHTML as e } from "./api.js";
++
++const TABLE_SEPARATOR = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
++const CODE_FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
++const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
++const HR = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
++const QUOTE = /^\s{0,3}>\s?(.*)$/;
++const UL_ITEM = /^(\s*)[-*+]\s+(.*)$/;
++const OL_ITEM = /^(\s*)(\d{1,9})[.)]\s+(.*)$/;
++const LINK = /\[([^\]\n]*)\]\(([^()\s]*)\)/g;
++const SAFE_URL = /^(https?:\/\/|mailto:|\/|#|\.{1,2}\/)/i;
++
++/** 行内语法：行内代码 / 链接 / 粗体 / 删除线 / 斜体。入参必须已经过转义。 */
++export function inlineRich(escaped) {
++  const codes = [];
++  const held = escaped.replace(/`([^`\n]+)`/g, (whole, code) => {
++    codes.push(code);
++    return `\u0000${codes.length - 1}\u0000`;
++  });
++  const html = held
++    .replace(LINK, (whole, label, url) => {
++      const target = url.replace(/&amp;/g, "&").trim();
++      if (!SAFE_URL.test(target)) return whole;
++      return `<a href="${target}" target="_blank" rel="noopener noreferrer">${label}</a>`;
++    })
++    .replace(/\*\*(?!\s)([^*\n]*?[^\s*])\*\*/g, "<strong>$1</strong>")
++    .replace(/~~(?!\s)([^~\n]*?[^\s~])~~/g, "<del>$1</del>")
++    .replace(/\*(?!\s)([^*\n]*?[^\s*])\*/g, "<em>$1</em>")
++    .replace(/(^|[\s(（])_(?!\s)([^_\n]*?[^\s_])_(?=[\s)）.。，,！!？?]|$)/g, "$1<em>$2</em>");
++  return html.replace(
++    /\u0000(\d+)\u0000/g,
++    (whole, index) => `<code>${codes[Number(index)] ?? ""}</code>`,
++  );
++}
++
++/** 表格行：转义的 `\|` 是单元格内容，不当作分隔符。 */
++export function splitTableRow(line) {
++  let body = line.trim();
++  if (body.startsWith("|")) body = body.slice(1);
++  if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
++  const cells = [];
++  let current = "";
++  for (let i = 0; i < body.length; i += 1) {
++    const ch = body[i];
++    if (ch === "\\" && body[i + 1] === "|") {
++      current += "|";
++      i += 1;
++    } else if (ch === "|") {
++      cells.push(current.trim());
++      current = "";
++    } else {
++      current += ch;
++    }
++  }
++  cells.push(current.trim());
++  return cells;
++}
++
++function renderTable(header, aligns, rows) {
++  const cell = (tag, text, index) => {
++    const align = aligns[index];
++    return `<${tag}${align ? ` style="text-align:${align}"` : ""}>${inlineRich(e(text))}</${tag}>`;
++  };
++  const head = `<thead><tr>${header.map((text, index) => cell("th", text, index)).join("")}</tr></thead>`;
++  const body = rows
++    .map((row) => `<tr>${header.map((_, index) => cell("td", row[index] ?? "", index)).join("")}</tr>`)
++    .join("");
++  return `<div class="md-table"><table>${head}<tbody>${body}</tbody></table></div>`;
++}
++
++/** 列表：按缩进决定嵌套层级，<ul>/<ol> 由相邻项的有序性切换。 */
++function renderListBlock(items) {
++  let html = "";
++  const stack = [];
++  for (const item of items) {
++    const tag = item.ordered ? "ol" : "ul";
++    while (stack.length && item.indent < stack[stack.length - 1].indent) {
++      html += `</li></${stack.pop().tag}>`;
++    }
++    const top = stack[stack.length - 1];
++    if (!top || item.indent > top.indent) {
++      const start = item.ordered && item.start !== 1 ? ` start="${item.start}"` : "";
++      html += `<${tag}${start}>`;
++      stack.push({ tag, indent: item.indent });
++    } else if (top.tag !== tag) {
++      html += `</li></${stack.pop().tag}><${tag}>`;
++      stack.push({ tag, indent: item.indent });
++    } else {
++      html += "</li>";
++    }
++    html += `<li>${inlineRich(e(item.text))}`;
++  }
++  while (stack.length) html += `</li></${stack.pop().tag}>`;
++  return html;
++}
++
++/** 块级：代码围栏、GFM 表格、标题、分割线、引用、列表；其余文字按整段转义。 */
++export function renderRich(text) {
++  const lines = String(text).split("\n");
++  const out = [];
++  let buffer = [];
++  const flush = () => {
++    if (!buffer.length) return;
++    out.push(inlineRich(e(buffer.join("\n"))));
++    buffer = [];
++  };
++  for (let i = 0; i < lines.length; i += 1) {
++    const line = lines[i];
++    const next = lines[i + 1];
++
++    const fence = CODE_FENCE.exec(line);
++    if (fence) {
++      const marker = fence[1];
++      flush();
++      const lang = fence[2].trim();
++      const code = [];
++      i += 1;
++      while (i < lines.length) {
++        const close = CODE_FENCE.exec(lines[i]);
++        if (
++          close &&
++          close[1][0] === marker[0] &&
++          close[1].length >= marker.length &&
++          close[2].trim() === ""
++        )
++          break;
++        code.push(lines[i]);
++        i += 1;
++      }
++      const cls = lang ? ` class="lang-${e(lang)}"` : "";
++      out.push(`<pre class="md-pre"><code${cls}>${e(code.join("\n"))}</code></pre>`);
++      continue;
++    }
++
++    if (line.includes("|") && next !== undefined && next.includes("-") && TABLE_SEPARATOR.test(next)) {
++      flush();
++      const header = splitTableRow(line);
++      const aligns = splitTableRow(next).map((mark) => {
++        const left = mark.startsWith(":");
++        const right = mark.endsWith(":");
++        if (left && right) return "center";
++        if (right) return "right";
++        if (left) return "left";
++        return "";
++      });
++      const rows = [];
++      i += 2;
++      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
++        rows.push(splitTableRow(lines[i]));
++        i += 1;
++      }
++      i -= 1;
++      out.push(renderTable(header, aligns, rows));
++      continue;
++    }
++
++    const heading = HEADING.exec(line);
++    if (heading) {
++      flush();
++      const level = Math.min(6, Math.max(3, heading[1].length + 1));
++      out.push(`<h${level}>${inlineRich(e(heading[2]))}</h${level}>`);
++      continue;
++    }
++
++    if (HR.test(line)) {
++      flush();
++      out.push("<hr>");
++      continue;
++    }
++
++    if (QUOTE.test(line)) {
++      flush();
++      const parts = [];
++      while (i < lines.length && QUOTE.test(lines[i])) {
++        parts.push(QUOTE.exec(lines[i])[1]);
++        i += 1;
++      }
++      i -= 1;
++      out.push(`<blockquote>${inlineRich(e(parts.join("\n")))}</blockquote>`);
++      continue;
++    }
++
++    const ulItem = UL_ITEM.exec(line);
++    const olItem = OL_ITEM.exec(line);
++    if (ulItem || olItem) {
++      flush();
++      const items = [];
++      while (i < lines.length) {
++        const ul = UL_ITEM.exec(lines[i]);
++        const ol = OL_ITEM.exec(lines[i]);
++        const m = ul || ol;
++        if (!m) break;
++        items.push({
++          indent: (ul ? m[1] : m[1]).replace(/\t/g, "  ").length,
++          ordered: Boolean(ol),
++          start: ol ? Number(ol[2]) : 1,
++          text: ul ? ul[2] : ol[3],
++        });
++        i += 1;
++      }
++      i -= 1;
++      out.push(renderListBlock(items));
++      continue;
++    }
++
++    buffer.push(line);
++  }
++  flush();
++  return out.join("\n");
++}
++
++/** 回复里有可见文字才占气泡：只有一个换行时不把「思考中」撤掉。 */
++export const hasVisibleText = (text) => Boolean(String(text ?? "").trim());
++
++/** 等待气泡用和回复同一个头像字。 */
++export const avatarLabel = (personaName) => String(personaName || "助手").slice(0, 1);
++
++/** 记住哪些「查看模型原文」是展开的：按消息序号 + 第几个 details 记。 */
++export function detailsState(box) {
++  const state = new Set();
++  if (!box || typeof box.querySelectorAll !== "function") return state;
++  box.querySelectorAll(".message[data-index]").forEach((node) => {
++    const index = node?.dataset ? node.dataset.index : undefined;
++    if (index === undefined) return;
++    node.querySelectorAll("details").forEach((details, offset) => {
++      if (details.open) state.add(`${index}:${offset}`);
++    });
++  });
++  return state;
++}
++
++export function applyDetailsState(box, state) {
++  if (!box || !state || !state.size || typeof box.querySelectorAll !== "function") return;
++  box.querySelectorAll(".message[data-index]").forEach((node) => {
++    const index = node?.dataset ? node.dataset.index : undefined;
++    if (index === undefined) return;
++    node.querySelectorAll("details").forEach((details, offset) => {
++      if (state.has(`${index}:${offset}`)) details.open = true;
++    });
++  });
++}
+diff --git a/core/ui/styles.css b/core/ui/styles.css
+index 1de5aa3..ba24398 100644
+--- a/core/ui/styles.css
++++ b/core/ui/styles.css
+@@ -2186,3 +2186,131 @@ dialog::backdrop {
+ }
+ .extension-panel { overflow: hidden; min-height: 480px; }
+ .extension-frame { display: block; width: 100%; height: max(480px, calc(100dvh - 230px)); border: 0; background: white; }
++
++/* 思考中提示 */
++.bubble.thinking { display: inline-flex; align-items: center; gap: 5px; color: #8a8f98; letter-spacing: 0.02em; }
++.bubble.thinking i { font-style: normal; animation: think-dot 1.2s infinite ease-in-out; }
++.bubble.thinking i:nth-child(2) { animation-delay: 0.15s; }
++.bubble.thinking i:nth-child(3) { animation-delay: 0.3s; }
++.bubble.thinking span { margin-left: 4px; animation: think-fade 1.8s infinite ease-in-out; }
++.bubble.thinking em.think-face { font-style: normal; letter-spacing: 0; margin-left: 2px; }
++@keyframes think-dot { 0%, 60%, 100% { opacity: 0.25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
++@keyframes think-fade { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
++
++/* 对话里的表格：无外框，只有横线；表头浅灰，数字列用等宽数字方便对齐 */
++.message .bubble .md-table {
++  white-space: normal;
++  margin: 8px 0;
++  max-width: 100%;
++  overflow-x: auto;
++}
++.message .bubble .md-table table {
++  border-collapse: collapse;
++  font-size: 12.5px;
++  line-height: 1.55;
++}
++.message .bubble .md-table th,
++.message .bubble .md-table td {
++  border: 0;
++  border-bottom: 1px solid var(--line);
++  padding: 7px 14px 7px 0;
++  vertical-align: top;
++  text-align: left;
++}
++.message .bubble .md-table th:last-child,
++.message .bubble .md-table td:last-child { padding-right: 0; }
++.message .bubble .md-table th {
++  color: var(--muted);
++  font-weight: 500;
++  font-size: 11.5px;
++  white-space: nowrap;
++  border-bottom-color: #dfe2ea;
++}
++.message .bubble .md-table tbody tr:last-child td { border-bottom: 0; }
++.message .bubble .md-table th[style*="right"],
++.message .bubble .md-table td[style*="right"] { font-variant-numeric: tabular-nums; }
++.message .bubble .md-table td:first-child { white-space: normal; }
++@media (max-width: 720px) {
++  .message .bubble .md-table table { font-size: 12px; }
++  .message .bubble .md-table th,
++  .message .bubble .md-table td { padding: 6px 9px 6px 0; }
++}
++
++/* 行内语法：粗体 / 行内代码 / 删除线 —— 勘 20261116 */
++.message .bubble strong {
++  font-weight: 650;
++  color: var(--ink);
++}
++.message .bubble code {
++  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
++  font-size: 0.92em;
++  padding: 1px 5px;
++  border-radius: 4px;
++  background: rgba(0, 0, 0, 0.055);
++  border: 1px solid rgba(0, 0, 0, 0.04);
++}
++.message .bubble del {
++  color: var(--muted);
++  text-decoration-thickness: 1px;
++}
++
++/* 块级排版：标题 / 列表 / 引用 / 分割线 / 代码围栏 / 链接 / 斜体 */
++.message .bubble h3,
++.message .bubble h4,
++.message .bubble h5,
++.message .bubble h6 {
++  margin: 12px 0 6px;
++  line-height: 1.35;
++  color: var(--ink);
++  font-weight: 650;
++}
++.message .bubble h3 { font-size: 1.08em; }
++.message .bubble h4 { font-size: 1.02em; }
++.message .bubble h5,
++.message .bubble h6 { font-size: 0.98em; color: var(--muted); }
++.message .bubble > :first-child,
++.message .bubble .md-table + p { margin-top: 0; }
++.message .bubble ul,
++.message .bubble ol {
++  margin: 6px 0;
++  padding-left: 20px;
++}
++.message .bubble ul { list-style: disc; }
++.message .bubble ol { list-style: decimal; }
++.message .bubble ul ul { list-style: circle; margin: 3px 0; }
++.message .bubble li { margin: 2px 0; }
++.message .bubble li > ul,
++.message .bubble li > ol { margin: 3px 0 0; }
++.message .bubble blockquote {
++  margin: 8px 0;
++  padding: 2px 0 2px 11px;
++  border-left: 2px solid var(--line, rgba(0, 0, 0, 0.14));
++  color: var(--muted);
++}
++.message .bubble hr {
++  margin: 12px 0;
++  border: 0;
++  border-top: 1px solid var(--line, rgba(0, 0, 0, 0.12));
++}
++.message .bubble a {
++  color: var(--accent, #2563eb);
++  text-decoration: underline;
++  text-underline-offset: 2px;
++}
++.message .bubble em { font-style: italic; }
++.message .bubble .md-pre {
++  margin: 8px 0;
++  padding: 9px 11px;
++  border-radius: 6px;
++  background: rgba(0, 0, 0, 0.045);
++  border: 1px solid rgba(0, 0, 0, 0.05);
++  overflow-x: auto;
++}
++.message .bubble .md-pre code {
++  padding: 0;
++  border: 0;
++  background: none;
++  font-size: 0.9em;
++  line-height: 1.5;
++  white-space: pre;
++}
+diff --git a/core/web.ts b/core/web.ts
+index b3ebdb2..9ca477a 100644
+--- a/core/web.ts
++++ b/core/web.ts
+@@ -84,6 +84,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
+     "styles.css",
+     "models.css",
+     "app.js",
++    "rich.js",
+     "api.js",
+     "icons.js",
+     "models.js",
+diff --git a/tests/current-session.test.ts b/tests/current-session.test.ts
+index 1fd90c8..9b813be 100644
+--- a/tests/current-session.test.ts
++++ b/tests/current-session.test.ts
+@@ -62,7 +62,7 @@ async function fixture(t: TestContext) {
+       localStorage: { whaleSession: legacyId }, location: { hash: "#chat" },
+       document: { getElementById: () => node, querySelectorAll: () => [] },
+       window: { addEventListener() {} } };
+-    for (const file of ["views", "memory", "personas", "models", "plugin-store", "host-updates"])
++    for (const file of ["views", "memory", "personas", "models", "plugin-store", "host-updates", "rich"])
+       Object.assign(sandbox, await import(new URL(`../core/ui/${file}.js`, import.meta.url).href));
+     runInNewContext(source, sandbox);
+     const ui = sandbox.consoleApp;
+diff --git a/tests/ui-rich-render.test.ts b/tests/ui-rich-render.test.ts
+new file mode 100644
+index 0000000..486c2e5
+--- /dev/null
++++ b/tests/ui-rich-render.test.ts
+@@ -0,0 +1,84 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++
++const load = () => import(new URL("../core/ui/rich.js", import.meta.url).href);
++const appSource = () => readFile(new URL("../core/ui/app.js", import.meta.url), "utf8");
++
++/** 只实现 detailsState / applyDetailsState 用到的那点 DOM 形状。 */
++type StubDetails = { open: boolean };
++type StubMessage = {
++  dataset: { index: string };
++  querySelectorAll: (selector: string) => StubDetails[];
++};
++const boxOf = (messages: StubMessage[]) => ({
++  querySelectorAll: (selector: string) => (selector === ".message[data-index]" ? messages : []),
++});
++const messageOf = (index: number, details: StubDetails[]): StubMessage => ({
++  dataset: { index: String(index) },
++  querySelectorAll: (selector: string) => (selector === "details" ? details : []),
++});
++
++test("表格单元格里的转义竖线不算列分隔", async () => {
++  const { renderRich } = await load();
++  const html = renderRich(["| 内容 | 状态 |", "| --- | --- |", "| A\\|B | 完成 |"].join("\n"));
++  assert.equal((html.match(/<td/g) || []).length, 2);
++  assert.match(html, /A\|B/);
++  assert.match(html, /完成/);
++  assert.doesNotMatch(html, /\\/);
++});
++
++test("行内代码保留原样，不被当成加粗或链接", async () => {
++  const { renderRich } = await load();
++  const bold = renderRich("`**原样**`");
++  assert.match(bold, /<code>\*\*原样\*\*<\/code>/);
++  assert.doesNotMatch(bold, /<strong>/);
++  const link = renderRich("`[说明](https://example.org/)`");
++  assert.match(link, /<code>\[说明\]\(https:\/\/example\.org\/\)<\/code>/);
++  assert.doesNotMatch(link, /<a /);
++});
++
++test("算式里的乘号不会被当成斜体", async () => {
++  const { renderRich } = await load();
++  const html = renderRich("3 * 4 * 5 = 60");
++  assert.match(html, /3 \* 4 \* 5 = 60/);
++  assert.doesNotMatch(html, /<em>/);
++});
++
++test("四个反引号围栏能把三个反引号的示例整段包住", async () => {
++  const { renderRich } = await load();
++  const html = renderRich(["````markdown", "```js", "**示例**", "```", "````"].join("\n"));
++  assert.equal((html.match(/<pre/g) || []).length, 1);
++  assert.match(html, /```js/);
++  assert.match(html, /\*\*示例\*\*/);
++  assert.doesNotMatch(html, /<strong>/);
++});
++
++test("重画消息列表时保留「查看模型原文」的展开状态", async () => {
++  const { detailsState, applyDetailsState } = await load();
++  const state = detailsState(boxOf([messageOf(0, [{ open: false }]), messageOf(1, [{ open: true }])]));
++  assert.equal(state.size, 1);
++  const after = boxOf([messageOf(0, [{ open: false }]), messageOf(1, [{ open: false }])]);
++  applyDetailsState(after, state);
++  assert.equal(after.querySelectorAll(".message[data-index]")[1].querySelectorAll("details")[0].open, true);
++});
++
++test("只有空白的首个分片不撤掉等待气泡，头像跟着人格名", async () => {
++  const { hasVisibleText, avatarLabel } = await load();
++  assert.equal(hasVisibleText(""), false);
++  assert.equal(hasVisibleText("\n"), false);
++  assert.equal(hasVisibleText(" \n\t"), false);
++  assert.equal(hasVisibleText("你好"), true);
++  assert.equal(avatarLabel("鲸鲸"), "鲸");
++  assert.equal(avatarLabel(""), "助");
++});
++
++test("流式分片只重画当前回复，等待气泡不再写死人名", async () => {
++  const source = await appSource();
++  const from = source.indexOf('data.type === "chunk"');
++  const branch = source.slice(from, source.indexOf('data.type === "done"', from));
++  assert.match(branch, /if \(created\) this\.renderMessages\(\);/);
++  assert.match(branch, /else this\.updateStreamingReply\(\);/);
++  assert.match(source, /data-streaming="1"/);
++  assert.doesNotMatch(source, /mini-avatar">勘</);
++});
