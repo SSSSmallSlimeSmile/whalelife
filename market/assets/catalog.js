@@ -197,7 +197,7 @@ window.WHALELIFE_CATALOG = {
       "verifiedReleases": [
         {
           "version": "0.13.1",
-          "hostRange": "=0.1.1",
+          "hostRange": "0.1.1",
           "platform": "win32",
           "arch": "x64",
           "assetUrl": "https://github.com/FelixTaXk/whalelife-community-voice/releases/download/v0.13.1/voice-0.13.1-win32-x64.wlpkg.gz",
@@ -240,7 +240,7 @@ window.WHALELIFE_CATALOG = {
       "verifiedReleases": [
         {
           "version": "0.2.15",
-          "hostRange": "=0.1.1",
+          "hostRange": "0.1.1",
           "platform": "win32",
           "arch": "x64",
           "assetUrl": "https://github.com/FelixTaXk/whalelife-community-studio/releases/download/v0.2.15/studio-0.2.15-win32-x64.wlpkg.gz",
@@ -337,7 +337,7 @@ window.WHALELIFE_CATALOG = {
       "verifiedReleases": [
         {
           "version": "0.1.6",
-          "hostRange": "=0.1.1",
+          "hostRange": "0.1.1",
           "platform": "win32",
           "arch": "x64",
           "dependencies": {
@@ -378,7 +378,7 @@ window.WHALELIFE_CATALOG = {
       "verifiedReleases": [
         {
           "version": "0.6.10",
-          "hostRange": "=0.1.1",
+          "hostRange": "0.1.1",
           "platform": "win32",
           "arch": "x64",
           "dependencies": {
