@@ -20,10 +20,12 @@ async function fixture(t: TestContext, broken = false, required = "1.0.0", paren
   const cache = join(root, ".artifacts/official-packages");
   await mkdir(cache, { recursive: true });
   const create = async (id: string, parentId: string | null, body: string, version = "1.0.0",
-    dependencies: Record<string, string> = parentId ? { [parentId]: required } : {}, manifest: {sub?:string[]} = {}) => {
+    dependencies: Record<string, string> = parentId ? { [parentId]: required } : {}, manifest: {sub?:string[]} = {},
+    extraFiles: [string,string][] = []) => {
     const files = [
       ["plugin.yaml", JSON.stringify({ id, name: id, version, description: "fixture", depends: parentId ? [parentId] : [], ...manifest })],
       ["index.ts", body],
+      ...extraFiles,
     ].map(([path, code]) => ({ path, bytes: Buffer.from(code) }));
     const header = { format: 1, files: files.map(f => ({ path: f.path, size: f.bytes.length, sha256: hash(f.bytes) })) };
     const packed = gzipSync(Buffer.concat([Buffer.from(JSON.stringify(header) + "\n"), ...files.map(f => f.bytes)]));
@@ -189,6 +191,58 @@ test("a new parent cannot hide an already installed disabled independent child",
   assert.equal(f.runtime.records.get("surf").manifest.version, "1.0.0");
   assert.equal(f.runtime.records.get("surf/manual").status, "stopped");
   assert.equal(await readFile(join(child,"index.ts"),"utf8"), "export function apply(){}");
+});
+
+test("an official update distinguishes bundled file ownership from conditional child registration", async t => {
+  const childId = "surf/bridge";
+  const plugin = "export function apply(){}";
+  const bridge: [string,string][] = [
+    ["sub/bridge/plugin.yaml", JSON.stringify({id:"bridge",name:"bridge",version:"1.0.0",description:"fixture"})],
+    ["sub/bridge/index.ts", plugin],
+  ];
+  const excluded = {sub:[]}, declared = {sub:["bridge"]};
+  const broken: [string,string][] = [bridge[0], ["sub/bridge/index.ts", 'export function apply(){throw Error("invalid bridge")}']];
+  for (const scenario of [
+    {name:"unused legacy bridge", manifest:excluded, files:bridge, success:true},
+    {name:"required child", manifest:excluded, files:bridge, required:true},
+    {name:"previously active", manifest:excluded, files:bridge, oldStatus:"active"},
+    {name:"previously disabled", manifest:excluded, files:bridge, oldStatus:"stopped"},
+    {name:"explicitly declared", manifest:declared, files:[]},
+    {name:"auto-discovered", manifest:{}, files:[]},
+    {name:"failed activation", manifest:declared, files:broken},
+  ]) await t.test(scenario.name, async t => {
+    const f = await fixture(t);
+    const before = await f.create("surf", null, plugin, "1.0.0", {}, scenario.oldStatus ? declared : excluded, bridge);
+    const original = {...before.entry.verifiedReleases[0], bundledPluginIds:[childId]};
+    const offline = new OfficialPlugins(f.runtime, [{...before.entry, verifiedReleases:[original]}]);
+    if (scenario.oldStatus === "stopped") await f.runtime.pluginState.setEnabled(childId, false);
+    await offline.apply((await offline.list()).plugins[0]);
+    assert.equal(f.runtime.records.get(childId)?.status, scenario.oldStatus);
+
+    const after = await f.create("surf", null, plugin, "1.1.0", {}, scenario.manifest, scenario.files);
+    const target = {...after.entry.verifiedReleases[0], bundledPluginIds:[childId],
+      conditionalBundledPluginIds:scenario.required ? undefined : [childId]};
+    const manager = new OfficialPlugins(f.runtime, [{...after.entry, verifiedReleases:[target, original]}]);
+    const plan = await manager.updatePlan("surf", "1.1.0");
+    assert.equal(plan.action,"update");
+    if (scenario.success) {
+      target.conditionalBundledPluginIds = [];
+      await assert.rejects(manager.apply(plan), /状态已变化/);
+      target.conditionalBundledPluginIds = [childId];
+      await manager.apply(plan);
+      assert.equal(f.runtime.records.get("surf").manifest.version, "1.1.0");
+      assert.equal(f.runtime.records.has(childId), false);
+      const childPath = join(f.root,"plugins/surf/sub/bridge/index.ts");
+      assert.equal(await readFile(childPath,"utf8"), plugin);
+      await manager.apply((await manager.list()).plugins[0]);
+      await assert.rejects(readFile(childPath), {code:"ENOENT"});
+    } else {
+      await assert.rejects(manager.apply(plan), /子插件未就绪：surf\/bridge/);
+      assert.equal(f.runtime.records.get("surf").manifest.version, "1.0.0");
+      assert.equal(f.runtime.records.get("surf").status, "active");
+      assert.equal(f.runtime.records.get(childId)?.status, scenario.oldStatus);
+    }
+  });
 });
 
 test("a restarted host can recognize and uninstall an approved version newer than its offline catalog", async t => {

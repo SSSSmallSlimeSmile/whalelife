@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { reviewedCommunityEntries } from "../../core/community-reviews.ts";
 import { parseHostRange } from "../../core/package-host-range.ts";
+import { officialUpdateEntries } from "../../core/official-update-registry.ts";
 import { inspectCommunityIcon } from "./review-community-icon.mjs";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -40,6 +41,8 @@ const { official } = catalog;
 const manifest = JSON.parse(read("../official-releases.json"));
 
 assert.equal(manifest.schemaVersion, 1);
+// Validate with the same rules as a host reading this candidate during a manual update.
+officialUpdateEntries(manifest, manifest.plugins);
 const ids = Array.from(official, plugin => plugin.id);
 assert.equal(new Set(ids).size, ids.length, "Duplicate official plugin id");
 assert.deepEqual(manifest.plugins.map(plugin => plugin.id), ids, "Catalog and manifest order differ");

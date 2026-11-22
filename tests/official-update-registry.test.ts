@@ -26,6 +26,15 @@ test("published historical variants confer ownership only and must pin an invent
     assert.throws(() => resolve({...historical,...change}), /审核资料无效/);
 });
 
+test("conditional children must be owned by the reviewed release", () => {
+  const row = {...release("1.1.0"), bundledPluginIds:["demo/bridge"]};
+  const targets = (conditionalBundledPluginIds: unknown) => officialUpdateEntries({schemaVersion:1,
+    plugins:[{...published, verifiedReleases:[{...row, conditionalBundledPluginIds}]}]},[local])[0].verifiedReleases;
+  assert.deepEqual(targets(["demo/bridge"])[0].conditionalBundledPluginIds, ["demo/bridge"]);
+  for (const invalid of [null, "demo/bridge", ["demo/bridge","demo/bridge"], ["demo/unowned"], ["other/bridge"]])
+    assert.throws(() => targets(invalid), /审核资料无效/);
+});
+
 test("current main authorizes official target bytes and the shipped inventory can still identify an old install", () => {
   const resolved = (plugins: unknown[]) => officialUpdateEntries({schemaVersion:1,plugins},[local])[0].verifiedReleases;
   assert.deepEqual(resolved([published]).filter(r=>!r.recognitionOnly).map(r=>r.version),["1.1.0"]);

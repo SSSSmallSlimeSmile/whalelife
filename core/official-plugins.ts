@@ -15,6 +15,7 @@ export type PackageRelease = {
   assetUrl?: string; sizeBytes?: number; inventorySha256?: string;
   composition?: Pick<Parameters<typeof import("./official-package-composition.ts").ensureComposedOfficialPackage>[1], "packagePart" | "zipPart"> & { name: string; version: string };
   dependencies: Record<string, string>; bundledPluginIds?: string[]; recognitionOnly?: boolean;
+  conditionalBundledPluginIds?: string[];
 };
 type Release = PackageRelease;
 export type PackageEntry = { id: string; name: string; repository: string; parentId: string | null; requiredPlugins: string[]; preserve?: string[]; verifiedReleases: Release[];
@@ -512,6 +513,8 @@ export class PluginPackages {
             const active = [...runtime.records.values()].filter(record => record.status === "active").map(record => record.id as string);
             const independentChildren = [...runtime.records.keys()].filter(id =>
               id.startsWith(p.pathId + "/") && !old.bundledPluginIds?.includes(id));
+            const conditional = p.entry.community ? [] : release.conditionalBundledPluginIds ?? [];
+            const previouslyAbsent = new Set(conditional.filter(id => !runtime.records.has(id)));
             let affected: string[] = [];
             const clearTree = () => {
               for (const id of runtime.records.keys()) if (id === p.pathId || id.startsWith(p.pathId + "/")) runtime.records.delete(id);
@@ -542,7 +545,14 @@ export class PluginPackages {
             }
             for (const id of release.bundledPluginIds ?? []) {
               const child = runtime.records.get(id);
-              if (!child || (p.enabled && runtime.pluginState.enabled(id) && child.status !== "active"))
+              if (!child && previouslyAbsent.has(id)) {
+                // Some hosts use the parent's built-in integration and never register its legacy child.
+                // An omitted sub list enables automatic discovery, so only an explicit exclusion applies.
+                const declared = runtime.records.get(parentOf(id))?.manifest.sub;
+                if (Array.isArray(declared) && !declared.includes(id.slice(id.lastIndexOf("/") + 1))) continue;
+              }
+              if (!child || (conditional.includes(id) && child.status === "failed") ||
+                  (p.enabled && runtime.pluginState.enabled(id) && child.status !== "active"))
                 throw Error("子插件未就绪：" + id + " " + (child?.error || ""));
             }
             // Children explicitly retired by the verified bundle disappear. Every independent consumer must return.

@@ -20,6 +20,9 @@
           "bundledPluginIds": [
             "qq/gallery"
           ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
           "sha256": "186bb94ac01c5607b0b3b22accd0bc4b8c719f4103814cb39e65b8edcfb587d6",
           "fileCount": 2925,
           "sizeBytes": 235673949,
@@ -36,6 +39,9 @@
           "delivery": "inventory",
           "verification": "market/official-builds.md",
           "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
             "qq/gallery"
           ],
           "sha256": "27cf9fd6cf23488d57e872d0701f7099d768447945cc1702a10de5c5c3cf070e",
@@ -56,6 +62,9 @@
           "bundledPluginIds": [
             "qq/gallery"
           ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
           "sha256": "1fc911677c29743a8f56c6408cc558126098f4b2e9cd2c252832937a132a9151",
           "fileCount": 2925,
           "sizeBytes": 235657251,
@@ -72,6 +81,9 @@
           "delivery": "inventory",
           "verification": "market/official-builds.md",
           "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
             "qq/gallery"
           ],
           "sha256": "e043ec63535a6f688a360239963e05d6d389d285ce766d9a30c844321f91915d",
@@ -92,6 +104,9 @@
           "bundledPluginIds": [
             "qq/gallery"
           ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
           "sha256": "b196868635b6c7c92ad4ea6f131ae030f891bef69591e2102d74bc64e8939e3c",
           "fileCount": 2943,
           "sizeBytes": 443202,
@@ -108,6 +123,9 @@
           "delivery": "github-release",
           "verification": "market/official-builds.md",
           "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
             "qq/gallery"
           ],
           "sha256": "b1a5e0bc03cdbc7b2376040283297c62dbb339303d668338428d798eb618e741",
@@ -128,6 +146,9 @@
           "bundledPluginIds": [
             "qq/gallery"
           ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
           "sha256": "513538cbd179a8d816c443c40fa35c2a8168d87a5e1362df3ca777f0f828a489",
           "fileCount": 2925,
           "sizeBytes": 440927,
@@ -144,6 +165,9 @@
           "delivery": "inventory",
           "verification": "market/official-builds.md",
           "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
             "qq/gallery"
           ],
           "sha256": "a54aeca89bc78c2d990b40619187254eab3bf312519284043b9a02c44c0525fa",

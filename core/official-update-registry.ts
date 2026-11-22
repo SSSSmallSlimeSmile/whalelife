@@ -91,6 +91,9 @@ export function officialUpdateEntries(registry: any, known = local.plugins, sign
           typeof r.arch !== "string" || !/^[a-z0-9]{1,16}$/.test(r.arch) ||
           !Array.isArray(r.bundledPluginIds ?? []) || !(r.bundledPluginIds ?? []).every((id: unknown) =>
             validPluginId(id) && id.startsWith(scope)) ||
+          (r.conditionalBundledPluginIds !== undefined && (!Array.isArray(r.conditionalBundledPluginIds) ||
+            new Set(r.conditionalBundledPluginIds).size !== r.conditionalBundledPluginIds.length ||
+            !r.conditionalBundledPluginIds.every((id: unknown) => r.bundledPluginIds?.includes(id)))) ||
           !r.dependencies || typeof r.dependencies !== "object" || Array.isArray(r.dependencies) ||
           !Object.entries(r.dependencies).every(([id,v]) => known.some(e => e.id === id && id !== entry.id) && stableVersion(v)))
         throw Error("官方发行包审核资料无效：" + entry.id);
@@ -105,7 +108,8 @@ export function officialUpdateEntries(registry: any, known = local.plugins, sign
         if (!seenInventory.has(key)) {
           seenInventory.add(key);
           releases.push({version:r.version, hostRange:r.hostRange, platform:r.platform, arch:r.arch,
-            dependencies:r.dependencies, bundledPluginIds:r.bundledPluginIds, sha256:r.sha256, recognitionOnly:true});
+            dependencies:r.dependencies, bundledPluginIds:r.bundledPluginIds, conditionalBundledPluginIds:r.conditionalBundledPluginIds,
+            sha256:r.sha256, recognitionOnly:true});
         }
         continue;
       }
