@@ -148,6 +148,7 @@ test("仅有历史清单、没有旧包缓存的手动安装也可以更新并�
   // Load a private copy of this standalone reader so its immutable inventory path uses the test fixture.
   const modulePath = join(root, "core/official-package-files.ts");
   await copyFile(new URL("../core/official-package-files.ts", import.meta.url), modulePath);
+  await copyFile(new URL("../core/instance-directory.ts", import.meta.url), join(root, "core/instance-directory.ts"));
   await copyFile(new URL("../core/plugin-replacement-recovery.ts", import.meta.url), join(root, "core/plugin-replacement-recovery.ts"));
   await rename(join(root, ".artifacts/official-packages", spec.sha256 + ".wlpkg.gz"), join(root, "unused.gz"));
   const old = {directory:spec.directory, recognitionOnly:true, sha256};
