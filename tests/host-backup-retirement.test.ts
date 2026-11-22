@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { temporaryDirectory } from "./temporary-directory.ts";
-import { prepareHostBackup, restoreHostBackup, retireHostBackup, collectRetiredHostBackups } from "../core/host-update-backup.ts";
+import { prepareHostBackup, restoreHostBackup, retireHostBackup, retireStockHostBackup, collectRetiredHostBackups } from "../core/host-update-backup.ts";
 
 test("cleanup retains an active trial and a backup without verified ownership", async () => {
   const root = await temporaryDirectory("whale-backup-retirement-");
@@ -69,4 +69,52 @@ test("a Windows file lock can outlive rollback and the next transaction", {skip:
   assert.equal(await collectRetiredHostBackups(root),false);
   await assert.rejects(stat(join(area,"backup")),{code:"ENOENT"});
   assert.ok(await readFile(join(area,next,"items.json")));
+});
+
+test("stock ownership survives partial cleanup but never authorizes a replacement directory", async () => {
+  const root = await temporaryDirectory("whale-stock-retirement-");
+  const area = join(root,".whalelife-updates"), base = join(area,"backup");
+  await mkdir(join(root,"config"));
+  await writeFile(join(root,"config/config.json"),JSON.stringify({memory:{root:"memory"},personas:{}}));
+  await prepareHostBackup(root);
+  await retireStockHostBackup(root);
+  // Original v0.1.1 recursively removes owner before a locked descendant.
+  await unlink(join(base,"owner"));
+  await collectRetiredHostBackups(root);
+  await assert.rejects(stat(base),{code:"ENOENT"});
+  await prepareHostBackup(root);
+  await retireStockHostBackup(root);
+  await rename(base,join(area,"completed-old"));
+  await mkdir(base);
+  await writeFile(join(base,"unknown"),"do not remove");
+  await collectRetiredHostBackups(root);
+  assert.equal(await readFile(join(base,"unknown"),"utf8"),"do not remove");
+  assert.ok(await stat(join(area,"completed-old/owner")));
+});
+
+test("an exclusively locked stock owner is rechecked before deleting anything", {skip:process.platform !== "win32"}, async t => {
+  const root = await temporaryDirectory("whale-stock-owner-lock-");
+  const base = join(root,".whalelife-updates/backup"), owner = join(base,"owner");
+  await mkdir(join(root,"config"));
+  await writeFile(join(root,"config/config.json"),JSON.stringify({memory:{root:"memory"},personas:{}}));
+  await prepareHostBackup(root);
+  const holder = spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",
+    "$h=[IO.File]::Open($env:WHALE_TEST_OWNER,'Open','Read','None');try{[Console]::WriteLine('locked');[Console]::In.ReadLine()|Out-Null}finally{$h.Dispose()}"],
+    {env:{...process.env,WHALE_TEST_OWNER:owner},stdio:["pipe","pipe","pipe"],windowsHide:true});
+  const exited = once(holder,"exit");
+  t.after(async () => { holder.stdin.end(); await exited; });
+  await Promise.race([once(holder.stdout,"data").then(([data])=>assert.match(String(data),/locked/)),
+    exited.then(()=>{ throw Error("占用进程意外退出"); })]);
+  await retireStockHostBackup(root);
+  assert.equal(await collectRetiredHostBackups(root),true);
+  assert.ok(await stat(join(base,"items.json")));
+  holder.stdin.end(); await exited;
+  // A queued check is only a request to re-read owner, never proof of ownership itself.
+  await writeFile(owner,"unknown");
+  await collectRetiredHostBackups(root);
+  assert.ok(await stat(join(base,"items.json")));
+  await writeFile(owner,"whalelife.host-backup/1");
+  await retireStockHostBackup(root);
+  await collectRetiredHostBackups(root);
+  await assert.rejects(stat(base),{code:"ENOENT"});
 });

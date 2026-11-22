@@ -26,6 +26,16 @@ import { registerMemoryTools } from "./memory-tools.ts";
 import { pluginServices } from "./plugin-services.ts";
 import { ExecutionArchive, registerExecutionTools } from "./execution-archive.ts";
 import type { HostUpdates } from "./host-updates.ts";
+import { migrateStockLauncher } from "./host-launcher-migration.ts";
+
+// Only a gated trial can persist the launcher, after all previously running plugins pass.
+class TrialRuntime extends Runtime {
+  override async checkInstalledPlugins(ids: string[]) {
+    await super.checkInstalledPlugins(ids);
+    await migrateStockLauncher(this.root);
+  }
+}
+
 export async function boot(
   root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   hostUpdates?: HostUpdates,
@@ -101,7 +111,8 @@ async function initialize(
   llm.diagnostics = diagnostics;
   tools.diagnostics = diagnostics;
   const toolOrder = await RegisteredToolOrder.open(resolve(root, "config/tool-order.json"), logger);
-  const runtime = new Runtime(root, logger, config.plugin_runtime);
+  const RuntimeClass = trial ? TrialRuntime : Runtime;
+  const runtime = new RuntimeClass(root, logger, config.plugin_runtime);
   // Recovery consumes plugin journals outside the host snapshot. Only the active host may do it.
   if (!trial) {
     const recovered = await recoverPendingPluginReplacements(root).catch(error => {

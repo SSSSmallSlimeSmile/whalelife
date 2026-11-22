@@ -4,14 +4,14 @@
  */
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { directoryAt } from "./official-package-files.ts";
+import { directoryAt } from "./instance-directory.ts";
 
 const area = ".whalelife-updates";
 const format = "whalelife.host-backup/1";
 const retired = "whalelife.host-backup/retired/1";
 export const validHostBackupSlot = (value: unknown): value is string =>
   typeof value === "string" && /^backup-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
-const preparing = /^\.backup-preparing-[A-Za-z0-9]{6}$/;
+const preparing = /^\.backup-(?:slot-)?preparing-[A-Za-z0-9]{6}$/;
 
 function backupName(slot?: string) {
   if (slot === undefined) return "backup"; // Existing installations and their interrupted updates.
@@ -68,7 +68,8 @@ export async function prepareHostBackup(root: string, slot?: string) {
   const paths = await backupPaths(root);
   const committed = join(parent, backupName(slot));
   if (await stat(committed)) throw Error("上次本体更新的资料备份尚待处理。");
-  const base = await mkdtemp(join(parent, ".backup-preparing-"));
+  // The original 0.1.1 manager can still be finishing cleanup of its own staging area.
+  const base = await mkdtemp(join(parent, slot ? ".backup-slot-preparing-" : ".backup-preparing-"));
   await writeFile(join(base, "owner"), format, { flag: "wx", mode: 0o600 });
   await mkdir(join(base, "saved"));
   await mkdir(join(base, "displaced"));
@@ -140,6 +141,56 @@ export async function retireHostBackup(root: string, slot?: string) {
   }
 }
 
+// The original v0.1.1 manager can recursively delete its fixed /backup after we acknowledge
+// service, including its owner file before a locked descendant. Keep the retirement proof
+// outside that tree, bound to this directory object, never to a future directory at the same path.
+const stockReceipt = /^stock-backup-(owned|verify)-([a-f0-9]+-[a-f0-9]+-[a-f0-9]+)$/;
+function busy(error: unknown) {
+  return ["EBUSY","EPERM","EACCES","ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "");
+}
+async function stockIdentity(base: string) {
+  const info = await lstat(base, {bigint:true}).catch((e: NodeJS.ErrnoException) => {
+    if (e.code !== "ENOENT") throw e;
+  });
+  if (!info?.isDirectory() || info.isSymbolicLink() || !info.ino || info.birthtimeNs <= 0n) return;
+  return [info.dev, info.ino, info.birthtimeNs].map(n => n.toString(16)).join("-");
+}
+async function emptyReceipt(path: string) {
+  try { await writeFile(path, "", {flag:"wx", mode:0o600}); }
+  catch (error: any) { if (error.code !== "EEXIST" || !await marker(path, "")) throw error; }
+}
+export async function retireStockHostBackup(root: string) {
+  const base = await directoryAt(root, area + "/backup");
+  if (!base) return;
+  const identity = await stockIdentity(base);
+  if (!identity) return;
+  let status = "owned";
+  try { if (!await marker(join(base,"owner"),format)) return; }
+  catch (error) {
+    if (!busy(error)) throw error;
+    // An unreadable owner is never an authorization to delete. Recheck when it unlocks.
+    status = "verify";
+  }
+  if (await stockIdentity(base) === identity)
+    await emptyReceipt(join(dirname(base), "stock-backup-" + status + "-" + identity));
+}
+async function collectStockReceipt(parent: string, name: string, match: RegExpMatchArray) {
+  const receipt = join(parent,name), base = join(parent,"backup");
+  if (!await marker(receipt,"")) return false;
+  const [, status, identity] = match;
+  if (await stockIdentity(base) === identity) {
+    if (status === "verify") {
+      if (await marker(join(base,"owner"),format) && await stockIdentity(base) === identity) {
+        await emptyReceipt(join(parent,"stock-backup-owned-" + identity));
+        await unlink(receipt);
+        return true;
+      }
+    } else await rm(base,{recursive:true,force:true});
+  }
+  await unlink(receipt);
+  return false;
+}
+
 // New transactions always use a fresh slot. Only a completed, marked snapshot
 // can enter this path, even if a new trial starts during a slow filesystem call.
 export async function collectRetiredHostBackups(root: string) {
@@ -147,6 +198,15 @@ export async function collectRetiredHostBackups(root: string) {
   if (!parent) return false;
   let pending = false;
   for (const entry of await readdir(parent, {withFileTypes:true})) {
+    const receipt = entry.isFile() && stockReceipt.exec(entry.name);
+    if (receipt) {
+      try { if (await collectStockReceipt(parent,entry.name,receipt)) pending = true; }
+      catch (error: any) {
+        if (busy(error)) pending = true;
+        else if (error.code !== "ENOENT") throw error;
+      }
+      continue;
+    }
     if (!entry.isDirectory() || !(entry.name === "backup" || validHostBackupSlot(entry.name) || preparing.test(entry.name))) continue;
     const base = join(parent,entry.name), owner = join(base,"owner"), label = join(base,"retired");
     try {
@@ -165,7 +225,7 @@ export async function collectRetiredHostBackups(root: string) {
       await rmdir(base);
     } catch (error: any) {
       if (error.code === "ENOENT") continue;
-      if (!["EBUSY","EPERM","EACCES","ENOTEMPTY"].includes(error.code)) throw error;
+      if (!busy(error)) throw error;
       pending = true;
     }
   }

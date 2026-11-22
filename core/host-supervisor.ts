@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { checkHostTrialEntry, launcherFingerprint, launcherProtocol, launcherUpgradeNeeded } from "./host-launcher-check.ts";
-import { directoryAt } from "./official-package-files.ts";
+import { directoryAt } from "./instance-directory.ts";
 import { collectRetiredHostBackups, prepareHostBackup, restoreHostBackup, retireHostBackup, validHostBackupSlot } from "./host-update-backup.ts";
 import { installLogOutputGuards, writeLogOutput } from "./log-output.ts";
 
@@ -126,7 +126,7 @@ async function save(root: string, state: HostUpdateState) {
 }
 
 // Kernel-owned locks disappear with the owner even if it crashes. No PID is used to signal or kill a process.
-export async function holdHostLock(root: string, role: "manager" | "worker", waitMs = 0) {
+export async function holdHostLock(root: string, role: "manager" | "worker" | "takeover", waitMs = 0) {
   // macOS and other Unix hosts lack Linux's abstract socket namespace. A SQLite exclusive
   // transaction is process-owned too, without leaving a stale bound socket path after a crash.
   if (process.platform !== "win32" && process.platform !== "linux") {
@@ -143,7 +143,7 @@ export async function holdHostLock(root: string, role: "manager" | "worker", wai
       return async () => db.close();
     } catch (error: any) {
       db.close();
-      if (error.errcode === 5) throw Error("此 WhaleLife 实例仍在运行或关闭中，请稍后再启动");
+      if (error.errcode === 5) throw Object.assign(Error("此 WhaleLife 实例仍在运行或关闭中，请稍后再启动"), {code:"WHALELIFE_INSTANCE_LOCKED"});
       throw error;
     }
   }
@@ -159,7 +159,7 @@ export async function holdHostLock(root: string, role: "manager" | "worker", wai
       return () => new Promise<void>(done => server.close(() => done()));
     } catch (error: any) {
       if (error.code !== "EADDRINUSE") throw error;
-      if (Date.now() >= limit) throw Error("此 WhaleLife 实例仍在运行或关闭中，请稍后再启动");
+      if (Date.now() >= limit) throw Object.assign(Error("此 WhaleLife 实例仍在运行或关闭中，请稍后再启动"), {code:"WHALELIFE_INSTANCE_LOCKED"});
       await delay(200);
     }
   }
@@ -231,11 +231,22 @@ async function recover(root: string, state: HostUpdateState, message: string) {
   return restored;
 }
 
-// The parent remains in the original installation across upgrades. It never imports a staged program.
-export async function runHostSupervisor(instanceRoot: string, options: { healthTimeoutMs?: number } = {}) {
+interface SupervisorOptions {
+  healthTimeoutMs?: number;
+  /** An original manager still owns the outer lock and delegates its active worker slot. */
+  bridge?: {
+    program: string;
+    signal: AbortSignal;
+    serving(health: Health, confirm: () => Promise<Health | null>): Promise<void>;
+  };
+}
+
+// The manager always forks its own matching worker, independently of the selected program.
+export async function runHostSupervisor(instanceRoot: string, options: SupervisorOptions = {}) {
   installLogOutputGuards();
   const root = await realpath(instanceRoot);
-  const unlock = await holdHostLock(root, "manager");
+  const unlock = options.bridge ? undefined : await holdHostLock(root, "manager");
+  let releaseTakeover: (() => Promise<void>) | undefined;
   let child: ReturnType<typeof launch> | undefined;
   let stopping = false;
   let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -243,12 +254,32 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
   const stop = () => { stopping = true; child?.stop(); };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  options.bridge?.signal.addEventListener("abort", stop, {once:true});
   try {
+    // If the original parent dies, a cold start may win its outer lock while the
+    // delegated manager is still draining. Serialize both before journal recovery.
+    releaseTakeover = await holdHostLock(root, "takeover", options.bridge ? 0 : 30_000);
+    if (options.bridge?.signal.aborted) return 0;
+    if (options.bridge) {
+      const unexpected = await holdHostLock(root, "manager").catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "WHALELIFE_INSTANCE_LOCKED") throw error;
+      });
+      if (unexpected) {
+        await unexpected();
+        throw Error("原管理器未持有此实例的启动锁，已取消接管。");
+      }
+    }
     // A previous parent may have been forcibly terminated while its worker is still draining.
     // Wait for that worker's kernel lock before reading a pending trial or touching its backup.
-    const startupFingerprint = await launcherFingerprint();
+    const startupFingerprint = await launcherFingerprint(root);
     await (await holdHostLock(root, "worker", 30_000))();
     let state = await readHostUpdateState(root);
+    if (stopping) return 0;
+    if (options.bridge) {
+      const selected = state.active === null ? root : hostReleaseDirectory(root, state.active);
+      if (state.pending || state.delivery || await realpath(selected) !== await realpath(options.bridge.program))
+        throw Error("原启动器选择的运行程序与已提交的本体版本不符，已保留实例资料。");
+    }
     let previousPlugins: string[] = [];
     if (state.delivery) {
       // In the older protocol this selected worker may already have accepted writes.
@@ -276,6 +307,7 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
       try {
         const program = version === null ? root : await directoryAt(root, base + "/releases/" + version);
         if (!program) throw Error("更新程序目录不存在");
+        if (stopping) return 0;
         child = launch(root, program, trial);
         let deadline: ReturnType<typeof setTimeout> | undefined;
         let health: Health | null;
@@ -312,7 +344,10 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
           state = selected;
           continue;
         }
-        if (!await child.health(true)) throw Error("本体启动后未响应健康检查");
+        const worker = child;
+        const serving = await worker.health(true);
+        if (!serving || serving.error || serving.version !== health.version) throw Error("本体启动后未响应健康检查");
+        if (options.bridge) await options.bridge.serving(serving, () => worker.health(true));
         // The previous worker is already serving. Retire only the completed transaction's slot.
         if (state.lastResult) await retireHostBackup(root, state.backupSlot)
           .catch((e: Error) => writeLogOutput("更新备份已保留：" + e.message, "stderr"));
@@ -327,7 +362,7 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
             const candidate = await directoryAt(root, base + "/releases/" + next.version);
             if (!candidate) throw Error("新版暂存目录不存在。");
             await checkHostTrialEntry(candidate);
-            if (await launcherFingerprint() !== startupFingerprint)
+            if (await launcherFingerprint(root) !== startupFingerprint)
               throw Error("安装根目录的启动程序在运行期间已改变。请重新启动 WhaleLife 后再更新。");
             const preparing: HostUpdateState = { ...state, pending: next.version, phase: "preparing", backupSlot: "backup-" + randomUUID() };
             await save(root, preparing);
@@ -360,7 +395,10 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
         await child.exit;
         child = undefined;
       }
-      if (!trial) throw Error(reason);
+      if (!trial) {
+        if (stopping) return 0;
+        throw Error(reason);
+      }
       // A disk error at commit can have an uncertain result. Only the durable
       // journal may authorize restoration, even while the same manager is alive.
       state = await readHostUpdateState(root);
@@ -375,6 +413,7 @@ export async function runHostSupervisor(instanceRoot: string, options: { healthT
     if (child) { child.stop(); await child.exit; }
     await cleanup;
     process.off("SIGINT", stop); process.off("SIGTERM", stop);
-    await unlock();
+    options.bridge?.signal.removeEventListener("abort", stop);
+    try { await releaseTakeover?.(); } finally { await unlock?.(); }
   }
 }

@@ -4,18 +4,28 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 // This protocol stages and probes the new core without running plugins before committing.
 export const launcherProtocol = "separate-trial-v1";
 export const launcherUpgradeNeeded = "当前安装根目录的启动器不支持新版安全预检。请先更新根目录的启动程序并重新启动 WhaleLife，再检查更新。";
 
-export async function launcherFingerprint() {
+export async function launcherFingerprint(root?: string) {
   const files = await Promise.all(["host-supervisor.ts", "host-child.ts", "host-launcher-check.ts"].map(name =>
     readFile(new URL(name, import.meta.url))));
+  const directory = dirname(fileURLToPath(import.meta.url));
+  if (root && dirname(directory) === join(root, ".whalelife-updates", "launchers") && /^[a-f0-9]{64}$/.test(basename(directory))) {
+    const core = join(root, "core");
+    if (await realpath(core) !== core) throw Error("安装根目录的启动器路径无效。");
+    for (const name of ["host-supervisor.ts", "host-child.ts"]) {
+      const path = join(core, name), stat = await lstat(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error("安装根目录的启动器入口无效。");
+      files.push(await readFile(path));
+    }
+  }
   return files.map(bytes => createHash("sha256").update(bytes).digest("hex")).join(":");
 }
 

@@ -8,8 +8,11 @@ import { cp, link, lstat, mkdir, mkdtemp, open, readdir, readFile, rename, rm, r
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createGunzip } from "node:zlib";
+import { directoryAt } from "./instance-directory.ts";
 import { recoverReplacementDirectories, replacementIdentity, replacementFormat, replacementName,
   retireReplacement, type ReplacementJournal } from "./plugin-replacement-recovery.ts";
+
+export { directoryAt };
 
 export interface OfficialPackageSpec {
   directory: string;
@@ -168,24 +171,6 @@ export async function digestFile(path: string, expectedSize?: number, fresh = fa
   return digest;
 }
 
-// Check every ancestor before crossing it. readdir also detects case aliases on case-insensitive volumes.
-export async function directoryAt(root: string, relative: string, create = false, made?: Set<string>) {
-  let parent = root;
-  const rootInfo = await lstat(parent);
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw Error("宿主目录不是普通目录");
-  for (const part of relative.split("/").filter(Boolean)) {
-    const names = await readdir(parent), aliases = names.filter(name => name.toLowerCase() === part.toLowerCase());
-    if (aliases.some(name => name !== part)) throw Error(`目录名大小写冲突：${part}`);
-    parent = join(parent, part);
-    if (!aliases.length && !create) return undefined;
-    if (!aliases.length) {
-      try { await mkdir(parent); made?.add(parent); } catch (error: any) { if (error.code !== "EEXIST") throw error; }
-    }
-    const stat = await lstat(parent);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error(`目录使用了链接或不是目录：${part}`);
-  }
-  return parent;
-}
 async function releaseAt(root: string, spec: OfficialPackageSpec) {
   if (!/^plugins\/[a-z][a-z0-9-]*(?:\/sub\/[a-z][a-z0-9-]*)*$/.test(spec.directory) || !hashPattern.test(spec.sha256) ||
       spec.preserve?.some(path => !safePath(path))) throw Error("官方插件目录或摘要无效");
