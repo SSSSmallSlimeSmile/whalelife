@@ -635,18 +635,18 @@ export class Channels {
     groups.set(groupKey, { fingerprint, promise });
     return promise;
   }
-  private generate(id: string, text: string, route: ChannelRoute, onChunk: (text: string) => void = () => {}, onContext?: (value: any) => void, expectedPersona?: string) {
+  private generate(id: string, text: string, route: ChannelRoute, onChunk: (text: string) => void = () => {}, onContext?: (value: any) => void, expectedPersona?: string, input?: TurnInput) {
     route.signal?.throwIfAborted();
     return this.sessions.chat(id, text, onChunk, onContext, expectedPersona, route, false, { wait: true,
-      onWaiting: () => onContext?.({ queued: true }) });
+      onWaiting: () => onContext?.({ queued: true }) }, input);
   }
   /** Web keeps its explicit session and streaming protocol, sharing the trusted dispatch path. */
-  web(id: string, text: string, onChunk: (text: string) => void, onContext?: (value: any) => void, expectedPersona?: string) {
+  web(id: string, text: string, onChunk: (text: string) => void, onContext?: (value: any) => void, expectedPersona?: string, input?: TurnInput) {
     if (this.closing) throw Error("渠道服务已关闭");
     safeId(id);
     return this.watch(this.generate(id, text, { channel: "web", account: "local", peer: id, signal: this.controller.signal,
       origin: { plugin: "core", channel: "web", platform: "控制台" },
-      ...this.policy({ id: "web", account: "local" }) }, onChunk, onContext, expectedPersona));
+      ...this.policy({ id: "web", account: "local" }) }, onChunk, onContext, expectedPersona, input));
   }
   register(adapter: ChannelAdapter, owner = "core"): ChannelHandle {
     if (this.closing) throw Error("渠道服务已关闭");

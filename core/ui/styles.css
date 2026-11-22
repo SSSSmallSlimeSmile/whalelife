@@ -1653,6 +1653,13 @@ html:has(#store-drawer[open]) { overflow: hidden; }
 .message.user {
   flex-direction: row-reverse;
 }
+/* 中途补充：虚线框 + 斜体，和正常发言区分开，表示这句并进了正在跑的那一轮 */
+.message.nudge .bubble {
+  font-style: italic;
+  opacity: 0.8;
+  outline: 1px dashed currentColor;
+  outline-offset: 2px;
+}
 .message.user .bubble {
   background: var(--accent-soft);
   border-radius: 12px 0 12px 12px;

@@ -251,9 +251,10 @@ export class Sessions {
     route?: ChannelRoute,
     transient = false,
     queue?: QueuePolicy,
+    input?: TurnInput,
   ) {
     const captured = this.captureRoute(id, route);
-    return this.dispatch(id, captured.signal, () => this.runChat(id, text, onChunk, captured.signal!, onContext, expectedPersona, captured, transient), queue);
+    return this.dispatch(id, captured.signal, () => this.runChat(id, text, onChunk, captured.signal!, onContext, expectedPersona, captured, transient, { transient: false }, input), queue);
   }
   /** Capture arrival metadata before any asynchronous routing or queue wait. */
   async outgoingIdentity(id: string, route: ChannelRoute) {

@@ -628,6 +628,14 @@ class ConsoleApp {
         if (this.state.page === "logs") this.renderLogs();
         return;
       }
+      if (data.type === "append") {
+        if (data.status === "accepted") this.toast("已并入本轮");
+        else if (data.status === "duplicate") this.toast("这句已经并进去了");
+        else if (data.status === "full") this.toast("本轮补充已满，这句没进去", true);
+        else if (data.status === "closed") this.toast("这一轮刚好收尾了，再发一次就成新的一轮", true);
+        else this.toast(data.error || "补充没送进去", true);
+        return;
+      }
       if (data.type === "context") {
         if (data.queued) {
           this.toast("当前会话正在处理其他请求，已排队等待");
@@ -728,21 +736,27 @@ class ConsoleApp {
           m.id === (persona?.model || this.state.config.bindings.chat) &&
           m.enabled,
       );
-      button.disabled = this.state.chatBusy || this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
+      // 本轮还在跑时按钮不禁用，改成「补充」：这句话并进当前回合，不另起一轮。
+      button.disabled = this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
       button.innerHTML =
-        (this.state.chatBusy ? "正在回复…" : "发送") + " " + icon("send");
+        (this.state.chatBusy ? "补充" : "发送") + " " + icon("send");
     }
     if ($("new-session")) $("new-session").disabled = this.state.chatBusy || this.sessionChanging;
   }
   sendMessage() {
     const text = ($("chat-input")?.value || "").trim();
-    if (
-      !text ||
-      !this.chatConnected ||
-      this.state.chatBusy ||
-      $("send").disabled
-    )
+    if (!text || !this.chatConnected || $("send").disabled) return;
+    // 本轮还在跑：不排队、不新起一轮，直接并进当前回合让它中途改方向。
+    if (this.state.chatBusy) {
+      this.chatWS.send(
+        JSON.stringify({ append: true, session: this.state.session, text }),
+      );
+      this.state.messages.push({ role: "user", text, nudge: true });
+      this.state.chatDraft = "";
+      $("chat-input").value = "";
+      this.renderMessages();
       return;
+    }
     this.state.messages.push({ role: "user", text });
     this.state.chatBusy = true;
     this.state.chatDraft = "";
@@ -786,7 +800,7 @@ class ConsoleApp {
     box.innerHTML = this.state.messages
       .map(
         (m) =>
-          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
+          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}${m.nudge ? " nudge" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
       )
       .join("");
     box.scrollTop = box.scrollHeight;

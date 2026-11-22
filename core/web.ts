@@ -3,11 +3,12 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { createServer } from "node:http";
-import { clock } from "./time.ts";
+import { clock, timezone } from "./time.ts";
 import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Channels } from "./channels.ts";
+import { TurnInput } from "./turn-input.ts";
 import { conversationRows } from "./channel-history.ts";
 import { PluginWebRegistry } from "./plugin-web.ts";
 import { WebClientDisconnectedError } from "./web-errors.ts";
@@ -42,6 +43,8 @@ export async function startWeb(config: any, services: any, runtime: any) {
   const official = new OfficialPlugins(runtime);
   const cacheDiagnostics = new CacheDiagnostics(services.modelConfig, services.executionArchive?.root);
   const lifetime = new AbortController();
+  // 本轮输入信箱：本轮还在跑时网页端可以往里塞话，等下一次请求模型前生效。
+  const webInboxes = new Map<string, TurnInput>();
   const reviewedPackages = async () => {
     try { return await readPublishedCommunityReviews(lifetime.signal); }
     catch {
@@ -615,23 +618,64 @@ export async function startWeb(config: any, services: any, runtime: any) {
     }
     let busy = false;
     ws.on("message", async (raw) => {
+      let data: any;
+      try {
+        data = JSON.parse(raw.toString());
+      } catch {
+        send({ type: "error", error: "请求不是合法 JSON" });
+        return;
+      }
+      // 中途插话：本轮还在跑时并进当前回合，改方向不必等下一轮。
+      // 它插不进已经发出去的那批工具调用，只在下次请求模型前生效。
+      if (data.append) {
+        const inbox = webInboxes.get(String(data.session ?? ""));
+        if (!inbox) {
+          send({ type: "append", status: "closed" });
+          return;
+        }
+        try {
+          const result = await inbox.append({
+            messageId: "web_" + randomBytes(8).toString("hex"),
+            text: String(data.text ?? ""),
+            receivedAt: new Date().toISOString(),
+            timezone: timezone(config.timezone),
+          }, async () => {});
+          send({ type: "append", status: result.status });
+        } catch (error: any) {
+          send({ type: "append", status: "rejected", error: error?.message ?? "补充失败" });
+        }
+        return;
+      }
       if (busy) {
         send({ type: "error", error: "正在回复，请稍候" });
         return;
       }
       busy = true;
       try {
-        const data = JSON.parse(raw.toString());
         if (data.expectedSession !== undefined &&
           (data.session !== data.expectedSession || data.expectedSession !== await sessions.current({}, lifetime.signal)))
           throw Error("当前会话已在其他窗口切换，请刷新后重试");
-        await channels.web(
-          data.session,
-          String(data.text ?? ""),
-          (text: string) => send({ type: "chunk", text }),
-          (context: any) => send({ type: "context", ...context }),
-          typeof data.persona === "string" ? data.persona : undefined,
-        );
+        const typed = String(data.text ?? "");
+        const inbox = new TurnInput({
+          messageId: "web_" + randomBytes(8).toString("hex"),
+          text: typed,
+          receivedAt: new Date().toISOString(),
+          timezone: timezone(config.timezone),
+        }, lifetime.signal);
+        webInboxes.set(String(data.session), inbox);
+        try {
+          await channels.web(
+            data.session,
+            typed,
+            (text: string) => send({ type: "chunk", text }),
+            (context: any) => send({ type: "context", ...context }),
+            typeof data.persona === "string" ? data.persona : undefined,
+            inbox,
+          );
+        } finally {
+          inbox.closeInput();
+          if (webInboxes.get(String(data.session)) === inbox) webInboxes.delete(String(data.session));
+        }
         send({ type: "done" });
       } catch (error: any) {
         logger.error("聊天失败", { error });
