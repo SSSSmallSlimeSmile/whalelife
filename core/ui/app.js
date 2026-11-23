@@ -629,11 +629,36 @@ class ConsoleApp {
         return;
       }
       if (data.type === "append") {
+        const entered = data.status === "accepted" || data.status === "duplicate";
         if (data.status === "accepted") this.toast("已并入本轮");
         else if (data.status === "duplicate") this.toast("这句已经并进去了");
         else if (data.status === "full") this.toast("本轮补充已满，这句没进去", true);
         else if (data.status === "closed") this.toast("这一轮刚好收尾了，再发一次就成新的一轮", true);
         else this.toast(data.error || "补充没送进去", true);
+        // 没进去的补充不能留成一条看着已发出的虚线气泡，原文放回输入框
+        const pending = this.pendingNudge;
+        this.pendingNudge = null;
+        if (!entered && pending) {
+          if (this.state.messages[pending.index]?.nudge) this.state.messages.splice(pending.index, 1);
+          if (!($("chat-input")?.value || "").trim()) {
+            $("chat-input").value = pending.text;
+            this.state.chatDraft = pending.text;
+          }
+          if (this.state.page === "chat") this.renderMessages();
+        }
+        return;
+      }
+      if (data.type === "started") {
+        // 记住这一轮的 id：两个窗口跑同一会话时，补充要落到自己那一轮上
+        this.turn = typeof data.turn === "string" ? data.turn : null;
+        return;
+      }
+      if (data.type === "reset") {
+        // 服务端把这段回复丢掉了（不会进存档），界面上的也得撤，否则刷新前后不一致
+        if (this.reply) {
+          this.reply.text = "";
+          if (this.state.page === "chat") this.renderMessages();
+        }
         return;
       }
       if (data.type === "context") {
@@ -660,6 +685,9 @@ class ConsoleApp {
         }
         this.reply.text += data.text;
       } else if (data.type === "done" || data.type === "error") {
+        this.turn = null;
+        this.pendingNudge = null;
+        if (data.type === "done") this.pendingSend = null;
         if (data.type === "error") {
           this.state.messages.push({ role: "error", text: data.error });
           this.toast(data.error, true);
@@ -749,9 +777,10 @@ class ConsoleApp {
     // 本轮还在跑：不排队、不新起一轮，直接并进当前回合让它中途改方向。
     if (this.state.chatBusy) {
       this.chatWS.send(
-        JSON.stringify({ append: true, session: this.state.session, text }),
+        JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text }),
       );
       this.state.messages.push({ role: "user", text, nudge: true });
+      this.pendingNudge = { text, index: this.state.messages.length - 1 };
       this.state.chatDraft = "";
       $("chat-input").value = "";
       this.renderMessages();

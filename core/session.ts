@@ -18,7 +18,7 @@ import { attribution, historyTail, originNote, originOf, renderHistory, speakerO
 import { normalizeSenderProfile } from "./sender-profile.ts";
 import { SessionQueue, type QueuePolicy } from "./session-queue.ts";
 import { TRANSIENT_REPLY, type ToolTurn } from "./tool-retention.ts";
-import type { TurnInput } from "./turn-input.ts";
+import type { TurnInput, TurnMessage } from "./turn-input.ts";
 import { resolveModelContext } from "./model-context.ts";
 import { diaryContext, diaryRequestPlan, writeDiary } from "./memory-diary.ts";
 import { contextFrame, diaryPrefix, fittingDiaryPrefix, historyEntry, recalledMaterial, supportsContextPrefix } from "./context-material.ts";
@@ -561,18 +561,22 @@ export class Sessions {
       const memoryRevision = engine
         ? await engine.contextRevision(id)
         : undefined;
+      // A real person's additions remain history even after transient tools.
+      const inputRow = (message: TurnMessage) => ({ type: "message", ...source, ...context,
+        origin: { ...source.origin, action: "接收消息" }, session: id, role: "user",
+        ...(message.senderProfile ? { senderProfile: message.senderProfile } : {}),
+        text: message.text, external_message_id: message.messageId,
+        ts: message.receivedAt, timezone: message.timezone });
+      // 补充在接收时就落盘：模型报错或取消也不能把它弄丢。
+      input?.setPersister(async (message) => { await memory.appendEvent(inputRow(message)); });
       const consumeInput = async () => {
         if (!input) return;
         for (const message of await input.take()) {
           signal.throwIfAborted();
           literalExample ||= requestsProtocolExample(message.text);
-          // A real person's additions remain history even after transient tools.
-          const row = { type: "message", ...source, ...context,
-            origin: { ...source.origin, action: "接收消息" }, session: id, role: "user",
-            ...(message.senderProfile ? { senderProfile: message.senderProfile } : {}),
-            text: message.text, external_message_id: message.messageId,
-            ts: message.receivedAt, timezone: message.timezone };
-          await memory.appendEvent(row);
+          const row = inputRow(message);
+          // 接收时就落过盘的，这里不再写一遍；排队中的轮次还没挂 persister，由这里补
+          if (!input.persisted(message.messageId)) await memory.appendEvent(row);
           messages.push({ role: "user", content: "【本轮用户补充；消息时间 " + messageTime(row, zone) +
             "；来源 " + JSON.stringify(source.origin) + "】\n" + speakerText(speakerOf(row), message.text) });
           diagnostics?.event("context.change", { operation: "append", source: "user_input", after: messages.at(-1) });
@@ -634,7 +638,12 @@ export class Sessions {
         requestSignal.throwIfAborted();
         if (!reply.toolCalls.length) {
           // Seal synchronously after the last await. Unsent candidates never enter history.
-          if (input && !input.tryFinish()) { stream?.flushUnclassified(); continue; }
+          if (input && !input.tryFinish()) {
+            stream?.flushUnclassified();
+            // 这段回复不会进存档，界面上也得撤掉，否则刷新前后不一致
+            input.notifyReset();
+            continue;
+          }
           final = reply.text;
           if (typeof final !== "string" || !final.trim())
             throw new EmptyModelResponseError(reply.finish_reason,

@@ -16,6 +16,29 @@ export class TurnInput {
   private characters = 0;
   private closed = false;
   private signal: AbortSignal;
+  private persister?: (message: TurnMessage) => Promise<void>;
+  // 哪些补充在接收时就已经落盘了，消费方别再写一遍
+  private persistedIds = new Set<string>();
+  private resetHandler?: () => void;
+
+  /** 谁来把补充落盘。会话在开跑时就该挂上，别等 consumeInput 才写。 */
+  setPersister(persist: (message: TurnMessage) => Promise<void>) {
+    this.persister = persist;
+  }
+
+  /** 这条补充是不是已经由 persister 落过盘。排队中的轮次还没有 persister，答案是否。 */
+  persisted(messageId: string) {
+    return this.persistedIds.has(messageId);
+  }
+
+  /** 被丢弃的那段回复要从界面上撤掉，否则和存档对不上。 */
+  setResetHandler(handler: () => void) {
+    this.resetHandler = handler;
+  }
+
+  notifyReset() {
+    this.resetHandler?.();
+  }
 
   constructor(initial: TurnMessage, signal: AbortSignal) {
     this.validate(initial);
@@ -32,7 +55,7 @@ export class TurnInput {
       throw Error("请输入 1–16000 字");
   }
 
-  async append(message: TurnMessage, persist: () => Promise<void>): Promise<TurnAppendResult> {
+  async append(message: TurnMessage, persist?: () => Promise<void>): Promise<TurnAppendResult> {
     this.validate(message);
     const snapshot = structuredClone(message), messageId = snapshot.messageId;
     if (this.signal.aborted) return { status: "cancelled", messageId };
@@ -52,7 +75,15 @@ export class TurnInput {
     this.seen.set(messageId, entry);
     this.pending.push(entry);
     this.characters += snapshot.text.length;
-    const commit = Promise.resolve().then(persist).then(() => { entry.saved = true; }).catch(error => {
+    const write = async () => {
+      // 调用方自己的账（渠道回执）先记，它可能拒绝；被拒就不留历史行
+      if (persist) await persist();
+      if (this.persister) {
+        await this.persister(snapshot);
+        this.persistedIds.add(snapshot.messageId);
+      }
+    };
+    const commit = Promise.resolve().then(write).then(() => { entry.saved = true; }).catch(error => {
       this.seen.delete(messageId);
       this.pending = this.pending.filter(item => item !== entry);
       this.characters -= snapshot.text.length;

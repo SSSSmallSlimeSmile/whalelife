@@ -44,7 +44,10 @@ export async function startWeb(config: any, services: any, runtime: any) {
   const cacheDiagnostics = new CacheDiagnostics(services.modelConfig, services.executionArchive?.root);
   const lifetime = new AbortController();
   // 本轮输入信箱：本轮还在跑时网页端可以往里塞话，等下一次请求模型前生效。
-  const webInboxes = new Map<string, TurnInput>();
+  // 按「轮」存，不按会话：两个窗口同时跑同一会话时，A 的补充不会落进 B 的回合。
+const webInboxes = new Map<string, TurnInput>();
+// 给不带 turn 的旧客户端兜底：会话 → 最近一轮的 turn id
+const webTurns = new Map<string, string>();
   const reviewedPackages = async () => {
     try { return await readPublishedCommunityReviews(lifetime.signal); }
     catch {
@@ -628,7 +631,10 @@ export async function startWeb(config: any, services: any, runtime: any) {
       // 中途插话：本轮还在跑时并进当前回合，改方向不必等下一轮。
       // 它插不进已经发出去的那批工具调用，只在下次请求模型前生效。
       if (data.append) {
-        const inbox = webInboxes.get(String(data.session ?? ""));
+        const turnId = typeof data.turn === "string" && data.turn
+          ? data.turn
+          : webTurns.get(String(data.session ?? ""));
+        const inbox = turnId ? webInboxes.get(turnId) : undefined;
         if (!inbox) {
           send({ type: "append", status: "closed" });
           return;
@@ -639,7 +645,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
             text: String(data.text ?? ""),
             receivedAt: new Date().toISOString(),
             timezone: timezone(config.timezone),
-          }, async () => {});
+          });
           send({ type: "append", status: result.status });
         } catch (error: any) {
           send({ type: "append", status: "rejected", error: error?.message ?? "补充失败" });
@@ -662,7 +668,12 @@ export async function startWeb(config: any, services: any, runtime: any) {
           receivedAt: new Date().toISOString(),
           timezone: timezone(config.timezone),
         }, lifetime.signal);
-        webInboxes.set(String(data.session), inbox);
+        // 被丢弃的那段回复要能从界面上撤掉
+        inbox.setResetHandler(() => send({ type: "reset" }));
+        const turnId = "t_" + randomBytes(8).toString("hex");
+        webInboxes.set(turnId, inbox);
+        webTurns.set(String(data.session), turnId);
+        send({ type: "started", turn: turnId });
         try {
           await channels.web(
             data.session,
@@ -674,7 +685,8 @@ export async function startWeb(config: any, services: any, runtime: any) {
           );
         } finally {
           inbox.closeInput();
-          if (webInboxes.get(String(data.session)) === inbox) webInboxes.delete(String(data.session));
+          webInboxes.delete(turnId);
+          if (webTurns.get(String(data.session)) === turnId) webTurns.delete(String(data.session));
         }
         send({ type: "done" });
       } catch (error: any) {
