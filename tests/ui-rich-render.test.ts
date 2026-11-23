@@ -151,3 +151,26 @@ test("思考中那三个点是实心小圆点，不是零尺寸的空标签", as
   assert.match(rule[0], /height:\s*5px/);
   assert.match(rule[0], /background:/);
 });
+test("链接地址里的星号原样保留，不被强调替换拆开", async () => {
+  const { renderRich } = await load();
+  // 作者给的例子：查询参数里带 *，浏览器拿到的 href 必须原样
+  const html = renderRich(
+    "[筛选文件](https://example.org/search?include=*.ts&exclude=*.test.ts)",
+  );
+  const href = /href="([^"]*)"/.exec(html)?.[1] ?? "";
+  assert.equal(href, "https://example.org/search?include=*.ts&exclude=*.test.ts");
+  assert.equal((href.match(/\*/g) || []).length, 2);
+  assert.doesNotMatch(html, /<em>/);
+  assert.match(html, />筛选文件<\/a>$/);
+});
+
+test("链接文字里的强调照常生效", async () => {
+  const { renderRich } = await load();
+  const bold = renderRich("[**粗**](https://example.org/a*b)");
+  assert.match(bold, /<strong>粗<\/strong>/);
+  assert.equal(/href="([^"]*)"/.exec(bold)?.[1] ?? "", "https://example.org/a*b");
+  assert.doesNotMatch(bold, /<em>/);
+  const em = renderRich("[普通 *斜* 文字](https://example.org/x)");
+  assert.match(em, /普通 <em>斜<\/em> 文字/);
+  assert.equal(/href="([^"]*)"/.exec(em)?.[1] ?? "", "https://example.org/x");
+});

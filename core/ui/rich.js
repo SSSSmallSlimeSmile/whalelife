@@ -22,17 +22,23 @@ export function inlineRich(escaped) {
     codes.push(code);
     return `\u0000${codes.length - 1}\u0000`;
   });
-  const html = held
-    .replace(LINK, (whole, label, url) => {
-      const target = url.replace(/&amp;/g, "&").trim();
-      if (!SAFE_URL.test(target)) return whole;
-      return `<a href="${target}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-    })
+  // 链接先只把 href 换成占位符，标签文字照常走强调逻辑；
+  // 否则后面几道 * / _ 替换会把地址里的 * 当成定界符拆开。
+  const targets = [];
+  const linked = held.replace(LINK, (whole, label, url) => {
+    const target = url.replace(/&amp;/g, "&").trim();
+    if (!SAFE_URL.test(target)) return whole;
+    targets.push(target);
+    return `<a href="\u0001${targets.length - 1}\u0001" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+  const html = linked
     .replace(/\*\*(?!\s)([^*\n]*?[^\s*])\*\*/g, "<strong>$1</strong>")
     .replace(/~~(?!\s)([^~\n]*?[^\s~])~~/g, "<del>$1</del>")
     .replace(/\*(?!\s)([^*\n]*?[^\s*])\*/g, "<em>$1</em>")
     .replace(/(^|[\s(（])_(?!\s)([^_\n]*?[^\s_])_(?=[\s)）.。，,！!？?]|$)/g, "$1<em>$2</em>");
-  return html.replace(
+  return html
+    .replace(/\u0001(\d+)\u0001/g, (whole, index) => targets[Number(index)] ?? "")
+    .replace(
     /\u0000(\d+)\u0000/g,
     (whole, index) => `<code>${codes[Number(index)] ?? ""}</code>`,
   );
