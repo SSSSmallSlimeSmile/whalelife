@@ -4,11 +4,13 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { inspectOfficialFiles, installOfficialFiles, replaceOfficialFiles, uninstallOfficialFiles } from "./official-package-files.ts";
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
+import { directoryAt, inspectOfficialFiles, installOfficialFiles, replaceOfficialFiles, uninstallOfficialFiles } from "./official-package-files.ts";
 import { ensureCachedPackage, ensureOfficialPackage } from "./official-package-download.ts";
 import { compareVersions as compare, compatibleHostFloor, stableVersion } from "./package-host-range.ts";
 import type { Runtime } from "./runtime.ts";
-import { readPackageInstalls, recordPackageInstalls, type CommunityInstallReceipt, type OfficialInstallReceipt } from "./community-install-receipts.ts";
+import { readPackageInstalls, recordPackageInstalls, removeCommunityInstall, type CommunityInstallReceipt, type OfficialInstallReceipt } from "./community-install-receipts.ts";
 
 export type PackageRelease = {
   version: string; hostRange: string; platform: string; arch: string; sha256: string;
@@ -28,7 +30,8 @@ type CommunityPolicy = {
   verify(root: string, entry: Entry, release: Release): Promise<void>;
 };
 type Step = { action: "install" | "enable" | "reuse" | "uninstall" | "update"; id: string; name: string; version: string };
-type Item = { entry: Entry; pathId: string; eligible: Release[]; target?: Release; existing?: Release; installedVersion?: string; installed: boolean; reason: string; enabled: boolean; active: boolean; inventoryUnavailable?: boolean };
+type Item = { entry: Entry; pathId: string; eligible: Release[]; target?: Release; existing?: Release; installedVersion?: string; installed: boolean; reason: string; enabled: boolean; active: boolean; inventoryUnavailable?: boolean;
+  bundledPluginIds?: string[]; independentPluginIds?: string[]; receiptBundledPluginIds?: string[] };
 const read = (file: string) => JSON.parse(readFileSync(new URL(file, import.meta.url), "utf8"));
 const registry: { plugins: Entry[]; installedBuilds?: InstalledBuild[] } = read("../market/official-releases.json");
 const cards: Card[] = read("../market/catalog.json").official;
@@ -75,6 +78,7 @@ export class PluginPackages {
   private communityReceipts = new Map<string, CommunityInstallReceipt>();
   private officialReceipts = new Map<string, OfficialInstallReceipt>();
   private receiptError = "";
+  private unscannedDependents: CommunityInstallReceipt[] = [];
   private runtime: Runtime;
   private entries: Entry[];
   private installedBuilds: InstalledBuild[];
@@ -89,7 +93,7 @@ export class PluginPackages {
     this.community = community;
   }
 
-  private async inspect(entry: Entry, updating: boolean): Promise<Item> {
+  private async inspect(entry: Entry, updating: boolean, removing: boolean): Promise<Item> {
     const runtime = this.runtime;
     const pathId = entry.parentId ? entry.parentId + "/" + entry.id : entry.id;
     const record = runtime.records.get(pathId);
@@ -108,6 +112,7 @@ export class PluginPackages {
       // A receipt restores offline ownership only, never a target or URL for installing into an empty directory.
       // The cached archive and every installed program file must still match its pinned digest below.
       item.entry = {...entry, preserve:[...new Set([...(entry.preserve ?? []), ...official.preserve])]};
+      if (removing) item.receiptBundledPluginIds = official.bundledPluginIds;
       const reviewed = candidates.find(r => r.sha256 === official.sha256);
       candidates.push({version:official.version, hostRange:reviewed?.hostRange ?? official.hostRange ?? "",
         platform:official.platform, arch:official.arch,
@@ -115,22 +120,29 @@ export class PluginPackages {
     }
     const receipt = entry.community && this.communityReceipts.get(pathId);
     const repository = record?.manifest.repository;
-    const sameRepository = repository == null || (typeof repository === "string" &&
-      repository.replace(/\/$/, "").toLowerCase() === entry.repository.replace(/\/$/, "").toLowerCase());
-    if (updating && entry.community && !sameRepository) {
+    const normalizeRepo = (url: string) => url.replace(/\/$/, "").toLowerCase();
+    const source = entry.repository || (receipt && receipt.repository);
+    if ((updating || removing) && entry.community && record && source && ((repository != null &&
+        (typeof repository !== "string" || normalizeRepo(repository) !== normalizeRepo(source))) ||
+        (receipt && receipt.repository && normalizeRepo(receipt.repository) !== normalizeRepo(source)))) {
       item.reason = "已安装插件声明的仓库与社区审核记录不同，请核对来源。";
       return item;
     }
-    if (updating && record) {
+    if ((updating || removing) && record) {
       const historical = {version: record.manifest.version, platform: process.platform, arch: process.arch, hostRange: "", dependencies: {}};
+      if (!updating && receipt && receipt.version !== item.installedVersion) {
+        item.reason = "当前版本与本机社区插件安装记录不同，请核对程序文件归属。";
+        return item;
+      }
       if (receipt && receipt.version === item.installedVersion) {
         // A review may retain only the newest version. A receipt pins the package that actually ran here.
         const approved = candidates.filter(r => r.sha256 === receipt.sha256);
+        if (removing) item.receiptBundledPluginIds = receipt.bundledPluginIds ?? approved[0]?.bundledPluginIds;
         candidates.splice(0, candidates.length, ...approved);
         if (!approved.length) candidates.push({...historical, sha256: receipt.sha256,
-          hostRange:receipt.hostRange ?? "", dependencies:receipt.dependencyVersions ?? {}});
+          hostRange:receipt.hostRange ?? "", dependencies:receipt.dependencyVersions ?? {}, bundledPluginIds:receipt.bundledPluginIds});
       }
-      for (const build of this.installedBuilds) {
+      if (updating || !entry.community) for (const build of this.installedBuilds) {
         if (build.runtimeId === pathId && build.platform === process.platform && build.arch === process.arch &&
             build.version === item.installedVersion) candidates.push({...historical, sha256: build.sha256, recognitionOnly: true});
       }
@@ -148,15 +160,15 @@ export class PluginPackages {
     for (const release of candidates) try {
       let candidate = release;
       const ownership = inventorySpec(item, release);
-      let inspection = await inspectOfficialFiles(runtime.root, ownership);
+      let inspection = await inspectOfficialFiles(runtime.root, ownership, removing);
       if (ownership.recognitionOnly && inspection.state === "blocked" && inspection.reason?.includes("ENOENT")) {
         if (release.inventorySha256 && !release.recognitionOnly) {
           candidate = {...release, inventorySha256: undefined};
-          inspection = await inspectOfficialFiles(runtime.root, spec(item, candidate));
+          inspection = await inspectOfficialFiles(runtime.root, spec(item, candidate), removing);
         }
         // Only a reviewed update operation can provide a reader, and only an already installed
         // version needs a remote inventory. Store it for confirmation and offline crash recovery.
-        if (record && entry.readInventory && (candidate === release || inspection.reason === "尚未取得已验证的发行包")) {
+        if (!removing && record && entry.readInventory && (candidate === release || inspection.reason === "尚未取得已验证的发行包")) {
           try {
             const bytes = await entry.readInventory(ownership.sha256);
             await ensureCachedPackage(runtime.root, {sha256:ownership.sha256, sizeBytes:bytes.length},
@@ -168,6 +180,11 @@ export class PluginPackages {
           candidate = release;
           inspection = await inspectOfficialFiles(runtime.root, ownership);
         }
+      }
+      if (inspection.bundledPluginIds) {
+        item.bundledPluginIds = inspection.bundledPluginIds;
+        item.independentPluginIds = inspection.independentPluginIds;
+        candidate = {...candidate, bundledPluginIds:inspection.bundledPluginIds};
       }
       if (updating && record && entry.community && candidate.assetUrl &&
           (receipt ? receipt.sha256 === candidate.sha256 : new Set(candidates.map(r => r.sha256)).size === 1) &&
@@ -198,24 +215,43 @@ export class PluginPackages {
 
   private dependents(item: Item, restored?: Item) {
     const runtime = this.runtime, owned = new Set([item.pathId, ...(item.existing?.bundledPluginIds ?? [])]);
-    const services = new Set([item.entry.id]);
+    const community = item.entry.community;
+    const dependencyIds = community ? owned : new Set([item.pathId]);
+    const services = new Set(community ? [...owned, item.entry.id] : [item.entry.id]);
     if (!item.pathId.includes("/"))
       for (const name of runtime.records.get(item.pathId)?.provided ?? []) services.add(name);
     const result = new Set<string>();
+    const nameOf = (id: string) => this.communityReceipts.get(id)?.name ?? this.officialReceipts.get(id)?.name ??
+      runtime.records.get(id)?.manifest.name ?? id;
+    for (const id of item.independentPluginIds ?? []) result.add(nameOf(id));
+    for (const id of owned) if (community && id !== item.pathId && (this.communityReceipts.has(id) || this.officialReceipts.has(id)))
+      result.add(nameOf(id));
+    if (community) for (const receipt of this.unscannedDependents)
+      if (!owned.has(receipt.id) && receipt.dependencies.some(id => owned.has(id))) result.add(receipt.name);
     for (const record of runtime.records.values()) {
       if (record.manifest.builtin || owned.has(record.id)) continue;
       const stored = this.communityReceipts.get(record.id) ?? this.officialReceipts.get(record.id);
       const receipt = stored?.version === record.manifest.version ? stored : undefined;
-      if (receipt?.dependencies.includes(item.pathId)) {
+      if (receipt?.dependencies.some(id => dependencyIds.has(id))) {
         result.add(receipt.name);
         continue;
       }
       const declared = this.entries.find(e => (e.parentId ? e.parentId + "/" + e.id : e.id) === record.id);
       // The restored release may predate a dependency just added in the new catalog metadata.
-      const needs = restored && restored.pathId === record.id ? Object.hasOwn(restored.existing!.dependencies, item.entry.id) :
-        !receipt && declared?.requiredPlugins.includes(item.entry.id);
+      const dependsOnPackage = (id: string) => (community && owned.has(id)) || id === item.entry.id;
+      const needs = restored && restored.pathId === record.id ? Object.keys(restored.existing!.dependencies).some(dependsOnPackage) :
+        !receipt && declared?.requiredPlugins.some(dependsOnPackage);
+      const consumes = (name: string) => {
+        if (community) {
+          // A child's services are private to its own subtree; an unrelated root can provide the same name.
+          for (let at = record; at; at = at.parent) if (at.local?.has(name)) return owned.has(at.id);
+          const provider = runtime.services.get(name);
+          if (provider) return owned.has(provider.owner);
+        }
+        return services.has(name);
+      };
       if (record.id.startsWith(item.pathId + "/") || needs ||
-          [...(record.manifest.depends ?? []), ...(record.dependencies ?? [])].some(n => services.has(n)))
+          [...(record.manifest.depends ?? []), ...(record.dependencies ?? [])].some(consumes))
         result.add(declared?.name ?? record.manifest.name ?? record.id);
     }
     return [...result];
@@ -237,7 +273,18 @@ export class PluginPackages {
     if (!update && item.installed && item.existing) {
       const used = this.dependents(item);
       if (this.receiptError) reason = this.receiptError;
-      else if (used.length) reason = "请先卸载依赖它的插件：" + used.join("、") + "。";
+      else if (item.entry.community && item.pathId.includes("/")) {
+        for (const parent of items.values()) {
+          if (!item.pathId.startsWith(parent.pathId + "/")) continue;
+          const missingArchive = parent.reason === "尚未取得已验证的发行包" || parent.reason.startsWith("ENOENT");
+          const bundled = parent.existing?.bundledPluginIds ?? (missingArchive ? parent.receiptBundledPluginIds : undefined);
+          if (bundled?.includes(item.pathId)) reason = "此子插件随" + parent.entry.name + "发行，请从父插件管理卸载。";
+          else if (!bundled)
+            reason = "无法核对" + parent.entry.name + "的已装发行包，不能确认此子插件可单独卸载。";
+          if (reason) break;
+        }
+      }
+      if (!reason && used.length) reason = "请先卸载依赖它的插件：" + used.join("、") + "。";
       if (!reason) add(item, "uninstall", item.existing);
     } else if (!reason && selected) {
       try {
@@ -290,7 +337,9 @@ export class PluginPackages {
       installedVersion: item.installedVersion ?? null, installed: item.installed, recognized: Boolean(item.existing),
       enabled: item.installed && item.enabled,
       status: this.runtime.records.get(item.pathId)?.status ?? null,
-      action, label, steps, components, reason, upgradeUrl, planKey };
+      action, label, steps, components, reason, upgradeUrl, planKey,
+      bundledPlugins:(item.bundledPluginIds ?? item.existing?.bundledPluginIds ?? [])
+        .map(id => ({id, name:String(this.runtime.records.get(id)?.manifest.name ?? id)})) };
   }
 
   private reverseConstraint(item: Item, target: Release, items: Map<string, Item>) {
@@ -317,19 +366,32 @@ export class PluginPackages {
     return "";
   }
 
-  private async snapshot(updating = false) {
+  private async snapshot(updating = false, uninstallId?: string) {
+    const removing = uninstallId !== undefined && this.entries.some(e => e.community && e.id === uninstallId);
     await this.runtime.pluginState.load();
+    this.unscannedDependents = [];
     try {
       const receipts = await readPackageInstalls(this.runtime.root);
       this.communityReceipts = receipts.community;
       this.officialReceipts = receipts.official;
       this.receiptError = "";
+      if (removing) {
+        for (const receipt of [...receipts.community.values(), ...receipts.official.values()]) {
+          if (!receipt.dependencies.length || this.runtime.records.has(receipt.id)) continue;
+          const dir = await directoryAt(this.runtime.root, "plugins/" + receipt.id.split("/").join("/sub/"));
+          if (dir && await lstat(join(dir, "plugin.yaml")).catch(error => { if (error.code !== "ENOENT") throw error; }))
+            this.unscannedDependents.push(receipt);
+        }
+      }
     } catch {
       this.communityReceipts.clear();
       this.officialReceipts.clear();
       this.receiptError = "无法读取社区插件的安装记录，确认依赖关系后才能卸载。";
     }
-    const items = await Promise.all(this.entries.map(entry => this.inspect(entry, updating)));
+    // Removal needs the target's own inventory and its ancestors' ownership. Other consumers
+    // are checked against their receipts, catalog declarations and live service dependencies.
+    const entries = removing ? this.entries.filter(e => e.id === uninstallId || uninstallId.startsWith(e.id + "/")) : this.entries;
+    const items = await Promise.all(entries.map(entry => this.inspect(entry, updating, removing)));
     return new Map(items.map(item => [item.entry.id, item]));
   }
 
@@ -349,6 +411,14 @@ export class PluginPackages {
       if (pending.length === waiting.length) throw Error("无法恢复更新前运行的插件：" + pending.join("、"));
       waiting = pending;
     }
+  }
+
+  async uninstallPlan(id: string) {
+    return this.runtime.managePackages(async () => {
+      const items = await this.snapshot(false, id), item = items.get(id);
+      if (!item?.installed) throw Object.assign(Error("未找到已安装的插件，请刷新插件管理。"), {status:409});
+      return this.plan(item, items);
+    });
   }
 
   async updatePlan(id: string, version: string) {
@@ -412,7 +482,7 @@ export class PluginPackages {
       signal.throwIfAborted();
       const updating = input?.action === "update";
       if (updating && typeof input?.version !== "string") throw Object.assign(Error("请确认目标版本。"), {status:409});
-      const runtime = this.runtime, items = await this.snapshot(updating);
+      const runtime = this.runtime, items = await this.snapshot(updating, input?.action === "uninstall" && typeof input.id === "string" ? input.id : undefined);
       const item = typeof input?.id === "string" && items.get(input.id);
       if (!item) throw Error("请选择官方目录内的插件。");
       const plan = this.plan(item, items, updating ? input.version as string : undefined);
@@ -562,9 +632,21 @@ export class PluginPackages {
             continue;
           }
           if (step.action === "uninstall") {
-            if (p.active) undo.push({ label: "恢复启用" + step.name, run: () => activate(p) });
-            await stop(p);
-            await uninstallOfficialFiles(runtime.root, inventorySpec(p, release));
+            if (!p.entry.community) {
+              if (p.active) undo.push({ label: "恢复启用" + step.name, run: () => activate(p) });
+              await stop(p);
+              await uninstallOfficialFiles(runtime.root, inventorySpec(p, release));
+              forget(p, release);
+              continue;
+            }
+            const owned = [p.pathId, ...(release.bundledPluginIds ?? [])];
+            const active = [...runtime.records.values()].filter(record => record.status === "active").map(record => record.id as string);
+            if (owned.some(id => active.includes(id))) {
+              undo.push({label:"恢复" + step.name + "和原运行状态", run:() => this.resumeAffected(active)});
+              for (const id of owned) if (runtime.records.get(id)?.status === "active") await runtime.stop(id);
+            }
+            const expected = this.communityReceipts.get(p.pathId)?.sha256;
+            await uninstallOfficialFiles(runtime.root, inventorySpec(p, release), () => removeCommunityInstall(runtime.root, p.pathId, expected));
             forget(p, release);
             continue;
           }
@@ -616,7 +698,7 @@ export class PluginPackages {
               .map(([id, version]) => [items.get(id)?.pathId ?? id, version]));
             const receipt = {id:p.pathId, name:p.entry.name, version:step.version, sha256:release.sha256, hostRange:release.hostRange,
               dependencies:Object.keys(dependencyVersions), dependencyVersions, ...(transactionId ? {transactionId} : {})};
-            if (p.entry.community) community.push(receipt);
+            if (p.entry.community) community.push({...receipt, repository:p.entry.repository, bundledPluginIds:release.bundledPluginIds ?? []});
             else official.push({...receipt, repository:p.entry.repository, platform:process.platform, arch:process.arch,
               bundledPluginIds:release.bundledPluginIds ?? [], preserve:p.entry.preserve ?? []});
           }

@@ -5,7 +5,7 @@
 import { api, escapeHTML as e, extensionPlugins } from "./api.js";
 import { icon } from "./icons.js";
 import { manageIcon } from "./community-icons.js";
-import { bindOfficialActions, renderManageBadgeSlot, renderManageSlot } from "./official-plugins.js";
+import { bindManageActions, renderManageBadgeSlot, renderManageSlot } from "./official-plugins.js";
 import { renderChildUpdates } from "./plugin-updates.js";
 export const extensionKey = (path) => "extension:" + encodeURIComponent(path);
 export const pluginKey = (id) => "plugin:" + encodeURIComponent(id);
@@ -79,7 +79,7 @@ export function pluginCard(status, p, state) {
   return `<article class="panel plugin-card ${p.id.includes("/") ? "child" : ""}"><div class="row">${manageIcon(state, p)}<div class="store-name-line"><h3>${e(p.name || p.id)}</h3>${renderManageBadgeSlot(state, p.id)}</div><div class="spacer"></div>${badge(p)}</div><code>${e(p.id)} · v${e(p.version || "0.1.0")}</code><p class="${p.error ? "plugin-error" : ""}">${e(p.error || p.description || "扩展插件")}</p><footer>${grouped ? `<a class="btn small" href="#${pluginKey(p.id)}">${icon("sliders")}打开 / 管理</a>` : extensionSettings(status, p.id)}${actions(p)}${renderManageSlot(state, p.id)}${!grouped && p.id.includes("/") ? '<small class="plugin-child-count">子插件</small>' : ""}</footer>${childMenu}</article>`;
 }
 export function bindPluginActions(app) {
-  if (app.state) bindOfficialActions(app);
+  if (app.state) bindManageActions(app);
   app.content.querySelectorAll(".plugin-more").forEach(menu => menu.addEventListener?.("keydown", event => {
     if (event.key === "Escape") { menu.open = false; menu.querySelector("summary").focus(); }
   }));

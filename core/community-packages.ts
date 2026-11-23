@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { PluginPackages, type PackageEntry, type PackageRelease } from "./official-plugins.ts";
 import { directoryAt, isPackageDataPath, verifiedPackageManifests } from "./official-package-files.ts";
-import { reviewedCommunityEntries } from "./community-reviews.ts";
+import { reviewedCommunityEntries, isReservedPluginId } from "./community-reviews.ts";
+import { readPackageInstalls } from "./community-install-receipts.ts";
 import { assertPluginCompatibility } from "./plugin-compatibility.ts";
 import { validPluginId } from "./plugin-state.ts";
 import type { Runtime } from "./runtime.ts";
@@ -22,10 +23,18 @@ export type ReviewedCommunityEntry = {
   dependencies: string[]; verifiedReleases?: ReviewedCommunityRelease[];
 };
 const directory = (id: string) => "plugins/" + id.split("/").join("/sub/");
-const official: PackageEntry[] = JSON.parse(readFileSync(new URL("../market/official-releases.json", import.meta.url), "utf8")).plugins;
-const cards: ReviewedCommunityEntry[] = JSON.parse(readFileSync(new URL("../market/catalog.json", import.meta.url), "utf8")).official;
+const officialRegistry = JSON.parse(readFileSync(new URL("../market/official-releases.json", import.meta.url), "utf8"));
+const official: PackageEntry[] = officialRegistry.plugins;
+const catalog = JSON.parse(readFileSync(new URL("../market/catalog.json", import.meta.url), "utf8"));
+const cards: ReviewedCommunityEntry[] = catalog.official;
+const shippedCommunity = reviewedCommunityEntries(catalog, error => console.warn(error.message));
 const officialId = (entry: PackageEntry) => entry.parentId ? entry.parentId + "/" + entry.id : entry.id;
 const officialAliases = new Map(official.map(e => [e.id, officialId(e)]));
+
+function reviewedPackage(record: ReviewedCommunityEntry): PackageEntry {
+  return {id:record.id, name:record.name, repository:record.repository, parentId:null, community:true,
+    requiredPlugins:record.dependencies, verifiedReleases:record.verifiedReleases ?? []};
+}
 /** Only preserved data (including data belonging to a previously removed child) can occupy a fresh target. */
 async function available(root: string, id: string) {
   const base = await directoryAt(root, directory(id));
@@ -82,12 +91,7 @@ export class CommunityPackages {
     const entries: PackageEntry[] = [];
     for (const record of reviewedCommunityEntries({ official: [], community: records })) {
       if (runtime.records.get(record.id.split("/")[0])?.manifest.builtin || !record.verifiedReleases?.length) continue;
-      const releases = record.verifiedReleases;
-      entries.push({id:record.id, name:record.name, repository:record.repository, parentId:null, community:true,
-        requiredPlugins:record.dependencies, verifiedReleases:releases.map(r => ({
-          version:r.version, hostRange:r.hostRange, platform:r.platform, arch:r.arch, assetUrl:r.assetUrl,
-          sha256:r.sha256, sizeBytes:r.sizeBytes, dependencies:r.dependencies, bundledPluginIds:r.bundledPluginIds,
-        }))});
+      entries.push(reviewedPackage(record));
     }
     this.ids = new Set(entries.map(e => e.id));
     // The public official registry uses short UI IDs. A community dependency always names the actual runtime ID.
@@ -136,4 +140,69 @@ export class CommunityPackages {
       throw Object.assign(Error("请选择已审核发行包的社区插件并确认安装。"), {status:409});
     return this.manager.apply(input);
   }
+}
+
+/** Resolve installed package owners offline. Only an explicit preview inspects program files. */
+export async function installedCommunityPackages(runtime: Runtime, reviews: readonly ReviewedCommunityEntry[] = shippedCommunity) {
+  const known = new Map(reviews.map(record => [record.id, reviewedPackage(record)]));
+  // An unreadable receipt blocks the package engine too. Keep known owners visible so their dialog
+  // can explain the problem, even when the user's local installation record is damaged.
+  let receipts: Awaited<ReturnType<typeof readPackageInstalls>> | undefined;
+  try { receipts = await readPackageInstalls(runtime.root); }
+  catch { /* The confirmation path re-reads the receipt and fails closed. */ }
+  for (const receipt of receipts?.community.values() ?? []) {
+    // Follow the installed artifact even when the current catalog drops it or changes repositories.
+    const review = known.get(receipt.id);
+    const releases = review?.verifiedReleases.filter(release => release.sha256 === receipt.sha256) ?? [];
+    known.set(receipt.id, {id:receipt.id, name:receipt.name, parentId:null, community:true,
+      repository:receipt.repository ?? (releases.length ? review!.repository : ""),
+      requiredPlugins:receipt.dependencies, verifiedReleases:releases});
+  }
+  const ancestors = new Map<string, PackageEntry>();
+  const entries = [...known.values()].filter(entry => {
+    const record = runtime.records.get(entry.id);
+    if (!record || record.manifest.builtin || runtime.records.get(entry.id.split("/")[0])?.manifest.builtin ||
+        isReservedPluginId(entry.id) || receipts?.official.has(entry.id)) return false;
+    const parts = entry.id.split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      const parentId = parts.slice(0, depth).join("/");
+      const source = known.get(parentId) ?? official.find(item => officialId(item) === parentId);
+      const installedParent = runtime.records.get(parentId);
+      const stored = receipts?.community.get(parentId) ?? receipts?.official.get(parentId);
+      const parent = stored?.version === installedParent?.manifest.version ? stored : undefined;
+      // The engine also checks ancestors outside the management list. An unknown parent supplies
+      // no ownership evidence; a recognized official parent can prove its child's independence.
+      ancestors.set(parentId, source ? {...source, id:parentId, parentId:null} : {id:parentId, name:parent?.name ?? installedParent?.manifest.name ?? parentId,
+        parentId:null, repository:parent?.repository ?? "", requiredPlugins:[], verifiedReleases:[],
+        community:!receipts?.official.has(parentId)});
+      const releases = source?.verifiedReleases ?? [];
+      const matches = parent ? releases.filter(r => r.sha256 === parent.sha256) :
+        releases.filter(r => r.version === installedParent?.manifest.version &&
+          (r.platform === "any" || r.platform === process.platform) && (r.arch === "any" || r.arch === process.arch));
+      const children = parent?.bundledPluginIds ?? (matches.length ? matches.flatMap(r => r.bundledPluginIds ?? []) : undefined);
+      // Matching a child's files cannot establish independent ownership under an unknown parent build.
+      if (children?.includes(entry.id) || (!children && !receipts?.community.has(entry.id))) return false;
+    }
+    return true;
+  });
+  const ids = new Set(entries.map(entry => entry.id));
+  const parents = [...ancestors].filter(([id]) => !ids.has(id)).map(([, entry]) => entry);
+  const manager = new PluginPackages(runtime, [...entries, ...parents], officialRegistry.installedBuilds ?? [], [], {available, verify});
+  function requireOwner(id: string) {
+    if (!ids.has(id)) throw Object.assign(Error("未找到这个已安装的独立社区发行包。随包子插件请从所属插件卸载。"), {status:409});
+  }
+  return {
+    plugins:entries.map(entry => ({id:entry.id, name:entry.name, version:runtime.records.get(entry.id)!.manifest.version})),
+    async preview(id: string) {
+      requireOwner(id);
+      const plan = await manager.uninstallPlan(id);
+      return {id, name:plan.name, installedVersion:plan.installedVersion, bundledPlugins:plan.bundledPlugins,
+        action:plan.action === "uninstall" ? plan.action : null, reason:plan.reason,
+        planKey:plan.action === "uninstall" ? plan.planKey : ""};
+    },
+    async apply(id: string, planKey: string) {
+      requireOwner(id);
+      return manager.apply({id, action:"uninstall", planKey});
+    },
+  };
 }

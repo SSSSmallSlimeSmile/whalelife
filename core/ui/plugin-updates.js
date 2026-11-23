@@ -77,7 +77,7 @@ function paintUpdates(app) {
   app.content.ownerDocument.getElementById("plugin-store")?.dispatchEvent(new Event("plugin-updates"));
 }
 
-function installedKey(state) {
+export function installedKey(state) {
   return JSON.stringify((state.status?.plugins || []).filter(p => !p.builtin)
     .map(p => [p.id, p.version, repositoryKey(p.repository)]).sort());
 }

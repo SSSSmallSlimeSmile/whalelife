@@ -3,7 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { api, escapeHTML as e } from "./api.js";
-import { clearCompletedUpdate, renderManageUpdate } from "./plugin-updates.js";
+import { clearCompletedUpdate, installedKey, renderManageUpdate } from "./plugin-updates.js";
 
 const stepNames = { install: "安装", enable: "启用", reuse: "沿用", uninstall: "卸载", update: "更新" };
 export const officialBadge = '<span class="store-official-badge">官方</span>';
@@ -39,7 +39,12 @@ function installedPlugin(state, runtimeId) {
 
 function removeButton(state, runtimeId) {
   const plugin = installedPlugin(state, runtimeId);
-  return plugin ? actionButton(state, plugin, "uninstall") : "";
+  if (plugin) return actionButton(state, plugin, "uninstall");
+  const community = state?.communityManaged?.find(item => item.id === runtimeId);
+  if (!community) return "";
+  const pending = state.communityRemovalPreview === runtimeId;
+  const label = pending ? "核对中…" : state.officialBusy === runtimeId ? "卸载中…" : "卸载";
+  return `<button type="button" class="btn small official-remove" data-community-uninstall="${e(runtimeId)}" aria-label="卸载 ${e(community.name)}" ${state.officialBusy || state.communityRemovalPreview ? "disabled" : ""}>${label}</button>`;
 }
 
 function installedBadge(state, runtimeId) {
@@ -66,8 +71,11 @@ function paintSlots(content, state) {
     if (focused) slot.querySelector("button:enabled")?.focus({ preventScroll: true });
   }
   for (const slot of content.querySelectorAll("[data-official-read-status]")) {
-    slot.innerHTML = state.officialReadError
+    const officialError = state.officialReadError
       ? `${e(state.officialReadError)} <button class="btn small" type="button" data-official-retry>重试</button>` : "";
+    const communityError = !slot.closest("#plugin-store") && state.communityManageError
+      ? `${e(state.communityManageError)} <button class="btn small" type="button" data-community-manage-retry>重试</button>` : "";
+    slot.innerHTML = [officialError, communityError].filter(Boolean).join("<br>");
   }
 }
 
@@ -112,6 +120,27 @@ async function refresh(app, redraw = false) {
   }
 }
 
+async function readCommunityManage(app) {
+  const { state, content } = app;
+  const key = installedKey(state);
+  if (app.communityManageSnapshot?.key === key) return;
+  const snapshot = app.communityManageSnapshot = { key };
+  state.communityManaged = null;
+  state.communityManageError = "";
+  if (!state.status?.plugins?.some(plugin => !plugin.builtin)) return;
+  try {
+    const { plugins } = await api("/api/community-plugins/manage");
+    if (app.communityManageSnapshot !== snapshot) return;
+    if (!Array.isArray(plugins)) throw Error("本机社区插件列表格式有误。");
+    state.communityManaged = plugins;
+  } catch (error) {
+    if (app.communityManageSnapshot !== snapshot) return;
+    state.communityManageError = "无法读取本机社区插件。" + error.message;
+  } finally {
+    if (app.communityManageSnapshot === snapshot) paintSlots(content, state);
+  }
+}
+
 function openDialog(app, plugin, title, body, submit, label, danger) {
   const page = app.state.page, doc = app.content.ownerDocument;
   app.dialog(title, body, submit, label, danger);
@@ -119,8 +148,8 @@ function openDialog(app, plugin, title, body, submit, label, danger) {
     if (app.state.page !== page || (doc.activeElement?.isConnected && doc.activeElement !== doc.body)) return;
     const drawer = doc.getElementById("store-drawer");
     const surface = drawer?.open ? drawer : app.content;
-    const buttons = surface.querySelectorAll("[data-plugin-update]:enabled, [data-official-action]:enabled, [data-community-install]:enabled, [data-store-entry]");
-    const button = [...buttons].find(b => (b.dataset.pluginUpdate || b.dataset.officialId || b.dataset.communityInstall) === plugin.id)
+    const buttons = surface.querySelectorAll("[data-plugin-update]:enabled, [data-official-action]:enabled, [data-community-install]:enabled, [data-community-uninstall]:enabled, [data-store-entry]");
+    const button = [...buttons].find(b => (b.dataset.pluginUpdate || b.dataset.officialId || b.dataset.communityInstall || b.dataset.communityUninstall) === plugin.id)
       || [...buttons].find(b => b.dataset.storeEntry === plugin.id);
     (button || surface.querySelector("#store-heading"))?.focus({ preventScroll: true });
   }, { once: true });
@@ -145,16 +174,22 @@ async function apply(app, plugin, source = "official") {
   paint(app);
   let applied = false;
   try {
-    const result = plugin.action === "update"
-      ? await api("/api/plugin-updates/apply", { id: plugin.id, source, version: plugin.version, planKey: plugin.planKey })
-      : await api(`/api/${source}-plugins/apply`, { id: plugin.id, action: plugin.action, planKey: plugin.planKey });
+    let result;
+    if (plugin.action === "update")
+      result = await api("/api/plugin-updates/apply", { id: plugin.id, source, version: plugin.version, planKey: plugin.planKey });
+    else if (source === "community" && plugin.action === "uninstall")
+      result = await api("/api/community-plugins/uninstall/apply", { id: plugin.id, planKey: plugin.planKey });
+    else result = await api(`/api/${source}-plugins/apply`, { id: plugin.id, action: plugin.action, planKey: plugin.planKey });
     if (!result.ok) throw Object.assign(Error(result.error || result.message || "插件操作失败。"), { rolledBack: result.rolledBack });
     applied = true;
     app.toast(result.message);
   } finally {
     try { await app.refreshStatus(); } catch (error) { app.toast(error.message, true); }
     state.officialBusy = null;
-    if (applied && plugin.action === "update") clearCompletedUpdate(app, plugin.id, source);
+    if (applied && (plugin.action === "update" || source === "community" && plugin.action === "uninstall"))
+      clearCompletedUpdate(app, plugin.id, source);
+    app.communityManageSnapshot = null;
+    state.communityManaged = null;
     // Installing or enabling a dependency changes the plan for other entries too.
     state.communityPlugins = null;
     app.communityRead = null;
@@ -164,7 +199,10 @@ async function apply(app, plugin, source = "official") {
       state.officialPlugins = null;
       state.recognizedRuntimeIds = null;
       content.ownerDocument.defaultView.location.hash = "#plugins";
-    } else await refresh(app, true);
+    } else {
+      await refresh(app, true);
+      if (content.querySelector("[data-official-manage-slot]")) await readCommunityManage(app);
+    }
   }
 }
 
@@ -213,8 +251,54 @@ export function confirmCommunityInstall(app, entry, plugin, stillCurrent) {
   }, e(plugin.buttonLabel || "确认安装"));
 }
 
+async function confirmCommunityUninstall(app, button) {
+  const { state, content } = app;
+  const id = button.dataset.communityUninstall;
+  const plugin = state.communityManaged?.find(item => item.id === id);
+  if (!plugin || button.closest("[data-official-manage-slot]")?.dataset.officialManageSlot !== id) return;
+  const page = state.page;
+  const current = () => state.page === page && !content.ownerDocument.getElementById("store-drawer")?.open &&
+    state.communityManaged?.some(item => item.id === id && item.version === plugin.version);
+  if (!current()) return;
+  state.communityRemovalPreview = id;
+  paintSlots(content, state);
+  let plan;
+  try {
+    plan = await api("/api/community-plugins/uninstall/preview", { id });
+    if (!current()) return;
+    if (plan.id !== id) throw Error("插件已变化，请重新查看。");
+    if (plan.action === "uninstall" && plan.installedVersion !== plugin.version) throw Error("已装版本已变化，请重新查看。");
+  } catch (error) {
+    if (current()) openDialog(app, plugin, "暂时无法卸载 " + plugin.name, `<p class="official-dialog-text">${e(error.message)}</p>`);
+    return;
+  } finally {
+    state.communityRemovalPreview = null;
+    paintSlots(content, state);
+  }
+  const children = plan.bundledPlugins || [];
+  const childList = children.length ? `<ul class="official-plan">${children.map(child => `<li><strong>${e(child.name || child.id)}</strong><small>${e(child.id)}</small></li>`).join("")}</ul>` : "";
+  if (plan.action !== "uninstall" || !plan.planKey) {
+    const reason = `<p class="official-dialog-text">${e(plan.reason || "当前无法安全卸载。")}</p>`;
+    openDialog(app, plugin, "暂时无法卸载 " + plugin.name, reason + (childList ? "<p>此发行包包含以下子插件。</p>" + childList : ""));
+    return;
+  }
+  const body = `<p class="official-dialog-text">将移除 <strong>${e(plugin.name)} v${e(plan.installedVersion)}</strong> 的程序文件。配置和用户数据会保留，重新安装后可以继续使用。</p>` +
+    (childList ? "<p>以下子插件随包卸载，其配置和用户数据也会保留。</p>" + childList : "");
+  openDialog(app, plugin, "卸载 " + plugin.name, body, async () => {
+    if (!current()) throw Error("卸载计划已变化，请关闭并重新查看。");
+    try { await apply(app, { ...plan, runtimeId: id }, "community"); }
+    catch (error) { throw Error(failureMessage(error)); }
+  }, e("卸载 " + plugin.name), true);
+}
+
 async function handleClick(app, event) {
-  if (app.state.officialBusy) return;
+  if (app.state.officialBusy || app.state.communityRemovalPreview) return;
+  if (event.target.closest("[data-community-manage-retry]")) {
+    app.communityManageSnapshot = null;
+    return readCommunityManage(app);
+  }
+  const communityButton = event.target.closest("[data-community-uninstall]");
+  if (communityButton && !communityButton.disabled) return confirmCommunityUninstall(app, communityButton);
   if (event.target.closest("[data-official-retry]")) return refresh(app);
   const button = event.target.closest("[data-official-action]");
   if (!button || button.disabled) return;
@@ -256,4 +340,9 @@ export function bindOfficialActions(app, root = app.content, readPlan = true) {
   app.officialActionClick ??= event => handleClick(app, event);
   root.addEventListener("click", app.officialActionClick);
   if (readPlan) void refresh(app);
+}
+
+export function bindManageActions(app) {
+  bindOfficialActions(app);
+  return readCommunityManage(app);
 }

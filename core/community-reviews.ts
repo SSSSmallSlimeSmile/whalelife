@@ -15,6 +15,7 @@ for (const entry of official.plugins) {
   reservedIds.add(entry.parentId ? entry.parentId + "/" + entry.id : entry.id);
   for (const release of entry.verifiedReleases) for (const id of release.bundledPluginIds ?? []) reservedIds.add(id);
 }
+export const isReservedPluginId = (id: string) => reservedIds.has(id);
 const versionPattern = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const platforms = new Set(["any", "aix", "darwin", "freebsd", "linux", "openbsd", "sunos", "win32", "android", "netbsd"]);
 const arches = new Set(["any", "arm", "arm64", "ia32", "loong64", "mips", "mipsel", "ppc", "ppc64", "riscv64", "s390", "s390x", "x64"]);

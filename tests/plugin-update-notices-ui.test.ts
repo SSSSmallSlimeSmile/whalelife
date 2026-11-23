@@ -179,8 +179,14 @@ test("management and store share an explicit check; binding, rendering and waiti
   const paths: string[] = [];
   let reply!: (response: Response) => void;
   let localReads = 0, localReply!: (response: Response) => void;
+  let managementReads = 0;
   t.mock.method(globalThis, "fetch", async (path: string, init: RequestInit) => {
     if (path === "/api/official-plugins") return Response.json({plugins: []});
+    if (path === "/api/community-plugins/manage") {
+      assert.equal(init.method, undefined);
+      managementReads++;
+      return Response.json({plugins: []});
+    }
     if (path === "/api/plugin-updates") {
       localReads++;
       return new Promise<Response>(resolve => { localReply = resolve; });
@@ -210,6 +216,7 @@ test("management and store share an explicit check; binding, rendering and waiti
   bind();
   assert.deepEqual(paths, []);
   assert.equal(localReads, 1);
+  assert.equal(managementReads, 1);
   assert.match(renderPlugins(app), /data-check-plugin-updates/);
   assert.match(renderStore(app), /data-check-plugin-updates/);
 

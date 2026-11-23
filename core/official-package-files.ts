@@ -23,6 +23,8 @@ export interface OfficialPackageSpec {
 export interface OfficialFileState {
   state: "absent" | "installed" | "blocked";
   reason?: string;
+  bundledPluginIds?: string[];
+  independentPluginIds?: string[];
 }
 interface PackageFile { path: string; size: number; sha256: string }
 interface Inventory {
@@ -220,7 +222,7 @@ function subDirectory(path: string) {
 }
 type RetainedPaths = { data: string[]; children: string[] };
 async function inspectTree(root: string, spec: OfficialPackageSpec, inventory: Inventory, fresh = false,
-  retained?: RetainedPaths, partial?: Set<string>): Promise<OfficialFileState> {
+  retained?: RetainedPaths, partial?: Set<string>, independent?: string[]): Promise<OfficialFileState> {
   const base = await directoryAt(root, spec.directory);
   if (!base) return { state: "absent" };
   const seen = new Set<string>();
@@ -236,6 +238,12 @@ async function inspectTree(root: string, spec: OfficialPackageSpec, inventory: I
       if (item.isDirectory()) {
         if (subDirectory(parent) && !inventory.directories.has(path)) {
           retained?.children.push(path);
+          if (independent) {
+            const manifest = await lstat(join(base!, path, "plugin.yaml")).catch(error => { if (!missing(error)) throw error; });
+            if (!manifest) await visit(path); // An uninstalled child may still have its data and config here.
+            else if (!manifest.isFile()) throw Error("子插件清单不是普通文件：" + path + "/plugin.yaml");
+            else independent.push((spec.directory + "/" + path).slice("plugins/".length).replaceAll("/sub/", "/"));
+          }
           continue;
         }
         const containsPreserved = spec.preserve?.some(value => value.toLowerCase().startsWith(path.toLowerCase() + "/"));
@@ -269,28 +277,38 @@ async function serialized<T>(root: string, work: () => Promise<T>) {
   try { await previous; return await work(); }
   finally { release(); if (held.get(key) === gate) held.delete(key); }
 }
-export async function inspectOfficialFiles(root: string, spec: OfficialPackageSpec): Promise<OfficialFileState> {
+export async function inspectOfficialFiles(root: string, spec: OfficialPackageSpec, communityRemoval = false): Promise<OfficialFileState> {
   return serialized(root, async () => {
+    let ownership: Pick<OfficialFileState, "bundledPluginIds" | "independentPluginIds"> = {};
     try {
       await checkPendingReplacement(root, spec.directory, true);
-      return await inspectTree(root, spec, (await releaseAt(root, spec)).inventory);
+      const {inventory} = await releaseAt(root, spec);
+      if (communityRemoval) {
+        const id = spec.directory.slice("plugins/".length).replaceAll("/sub/", "/");
+        ownership = {bundledPluginIds:inventory.files.filter(f => /^(?:sub\/[^/]+\/)+plugin\.yaml$/.test(f.path))
+          .map(f => id + "/" + f.path.split("/").filter((_, i) => i % 2 === 1).join("/")), independentPluginIds:[]};
+      }
+      return {...await inspectTree(root, spec, inventory, false, undefined, undefined, ownership.independentPluginIds), ...ownership};
     }
-    catch (error) { return { state: "blocked", reason: errorText(error) }; }
+    catch (error) { return { state: "blocked", reason: errorText(error), ...ownership }; }
   });
 }
 
-async function change(root: string, spec: OfficialPackageSpec, install: boolean, interruptedInstall = false) {
+async function change(root: string, spec: OfficialPackageSpec, install: boolean, interruptedInstall = false, commitRemoval?: () => Promise<void>) {
   return serialized(root, async () => {
     await checkPendingReplacement(root, spec.directory);
     if (install && spec.recognitionOnly) throw Error("历史清单仅供识别已安装的官方版本。");
     const { archive, cache, inventory } = await releaseAt(root, spec);
     const partial = interruptedInstall ? new Set<string>() : undefined;
-    const before = await inspectTree(root, spec, inventory, true, undefined, partial);
+    const independent = commitRemoval ? [] as string[] : undefined;
+    const before = await inspectTree(root, spec, inventory, true, undefined, partial, independent);
+    if (commitRemoval && before.state === "absent") throw Error("已安装的程序文件已变化，请重新确认卸载。");
+    if (independent?.length) throw Error("请先卸载独立安装的子插件：" + independent.join("、"));
     if (before.state === (install ? "installed" : "absent")) return;
     await directoryAt(root, ".artifacts/official-packages", true);
     const staging = await mkdtemp(join(cache, install ? "install-" : "uninstall-"));
     const moved: PackageFile[] = [], made = new Set<string>(), checked = new Set<string>();
-    let keepBackup = false;
+    let keepBackup = false, removalCommitted = false;
     try {
       if (install) await readPackage(archive, staging, inventory);
       const base = (await directoryAt(root, spec.directory, install, made))!;
@@ -319,6 +337,14 @@ async function change(root: string, spec: OfficialPackageSpec, install: boolean,
       if (!install) {
         for (const path of [...inventory.directories].sort((a, b) => b.length - a.length)) await removeEmpty(join(base, path));
         await removeEmpty(base);
+        if (commitRemoval) {
+          const children: string[] = [];
+          const remainder = await inspectTree(root, spec, inventory, true, undefined, undefined, children);
+          if (children.length) throw Error("卸载期间出现独立子插件：" + children.join("、"));
+          if (remainder.state !== "absent") throw Error("卸载期间程序目录已变化，请重新核对。");
+          await commitRemoval();
+          removalCommitted = true;
+        }
       }
     } catch (error) {
       const failures: string[] = [];
@@ -341,7 +367,10 @@ async function change(root: string, spec: OfficialPackageSpec, install: boolean,
       }
       throw Error(`${errorText(error)}；已撤回本步的 ${moved.length} 项文件改动`);
     } finally {
-      if (!keepBackup) await rm(staging, { recursive: true, force: true, maxRetries: 3 });
+      if (!keepBackup) await rm(staging, { recursive: true, force: true, maxRetries: 3 }).catch(error => {
+        if (!removalCommitted) throw error;
+        console.warn("插件已卸载，临时备份清理失败：", staging, error);
+      });
     }
   });
 }
@@ -350,7 +379,9 @@ async function removeEmpty(path: string) {
   catch (error: any) { if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error; }
 }
 export function installOfficialFiles(root: string, spec: OfficialPackageSpec) { return change(resolve(root), spec, true); }
-export function uninstallOfficialFiles(root: string, spec: OfficialPackageSpec) { return change(resolve(root), spec, false); }
+export function uninstallOfficialFiles(root: string, spec: OfficialPackageSpec, commitRemoval?: () => Promise<void>) {
+  return change(resolve(root), spec, false, false, commitRemoval);
+}
 /** Only for a journaled dependency that was absent before the interrupted install. */
 export function rollbackInterruptedInstall(root: string, spec: OfficialPackageSpec) { return change(resolve(root), spec, false, true); }
 

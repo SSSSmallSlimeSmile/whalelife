@@ -12,8 +12,9 @@ import { conversationRows } from "./channel-history.ts";
 import { PluginWebRegistry } from "./plugin-web.ts";
 import { WebClientDisconnectedError } from "./web-errors.ts";
 import { OfficialPlugins } from "./official-plugins.ts";
-import { CommunityPackages, type ReviewedCommunityEntry } from "./community-packages.ts";
+import { CommunityPackages, installedCommunityPackages, type ReviewedCommunityEntry } from "./community-packages.ts";
 import { readPublishedCommunityReviews } from "./community-reviews.ts";
+import { validPluginId } from "./plugin-state.ts";
 import { PluginUpdates } from "./plugin-updates.ts";
 import { officialUpdateEntries, readOfficialUpdateEntries } from "./official-update-registry.ts";
 import { HostUpdates } from "./host-updates.ts";
@@ -42,8 +43,12 @@ export async function startWeb(config: any, services: any, runtime: any) {
   const official = new OfficialPlugins(runtime);
   const cacheDiagnostics = new CacheDiagnostics(services.modelConfig, services.executionArchive?.root);
   const lifetime = new AbortController();
+  let lastCommunityReviews: ReviewedCommunityEntry[] | undefined;
   const reviewedPackages = async () => {
-    try { return await readPublishedCommunityReviews(lifetime.signal); }
+    try {
+      lastCommunityReviews = await readPublishedCommunityReviews(lifetime.signal);
+      return lastCommunityReviews;
+    }
     catch {
       throw Object.assign(Error("暂时无法核对社区插件的审核记录。请稍后重试，或查看作者的安装说明。"), { status: 503 });
     }
@@ -214,6 +219,23 @@ export async function startWeb(config: any, services: any, runtime: any) {
         return send(200, { ok: true });
       }
       if (!authorized(req)) return send(401, { error: "请先登录" });
+      if (pathname === "/api/community-plugins/manage" && req.method === "GET") {
+        const { plugins } = await installedCommunityPackages(runtime, lastCommunityReviews);
+        return send(200, { plugins });
+      }
+      if (req.method === "POST" && (pathname === "/api/community-plugins/uninstall/preview" ||
+          pathname === "/api/community-plugins/uninstall/apply")) {
+        if (req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json")
+          return send(415, {error:"请使用 JSON 提交操作。"});
+        const input = await body(req, 4096), apply = pathname.endsWith("/apply");
+        if (!input || !validPluginId(input.id) || Object.keys(input).some(key => key !== "id" && !(apply && key === "planKey")) ||
+            (apply && (typeof input.planKey !== "string" || !/^[a-f0-9]{64}$/.test(input.planKey))))
+          return send(400, {error:"请先查看此社区插件的卸载计划，再确认卸载。"});
+        const packages = await installedCommunityPackages(runtime, lastCommunityReviews);
+        if (!apply) return send(200, await packages.preview(input.id));
+        try { return send(200, await packages.apply(input.id, input.planKey)); }
+        finally { lastOfficial = undefined; }
+      }
       if (pathname === "/api/community-plugins" && req.method === "GET") {
         const reviews = await reviewedPackages();
         return send(200, reviews.length ? await new CommunityPackages(runtime, reviews).list() : { plugins: [] });
