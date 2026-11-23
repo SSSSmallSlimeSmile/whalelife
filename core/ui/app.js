@@ -132,6 +132,8 @@ class ConsoleApp {
       if (event.clientX < r.left || event.clientX >= r.right || event.clientY < r.top || event.clientY >= r.bottom) this.leaveStore(true);
     });
     window.addEventListener("focus", () => this.syncView());
+    // toggle 不冒泡，只能用捕获阶段；用户亲手收起时也要记下来
+    document.addEventListener("toggle", (event) => this.rememberDetails(event), true);
     $("login-form").onsubmit = (event) => {
       event.preventDefault();
       this.login();
@@ -783,6 +785,22 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
+  /** 「查看模型原文」的展开状态：按「消息序号:第几个 details」记，跨整页重画保留。 */
+  rememberDetails(event) {
+    const details = event && event.target;
+    if (!details || details.tagName !== "DETAILS") return;
+    const node = details.closest ? details.closest(".message[data-index]") : null;
+    if (!node) return;
+    const index = node.dataset ? node.dataset.index : undefined;
+    if (index === undefined) return;
+    const list = Array.from(node.querySelectorAll("details"));
+    const offset = list.indexOf(details);
+    if (offset < 0) return;
+    if (!this.detailsOpen) this.detailsOpen = new Set();
+    const key = index + ":" + offset;
+    if (details.open) this.detailsOpen.add(key);
+    else this.detailsOpen.delete(key);
+  }
   /** 回复里已经有可见文字，才让它占一个气泡。 */
   replyVisible() {
     return hasVisibleText(this.reply && this.reply.text);
@@ -795,7 +813,9 @@ class ConsoleApp {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
       return;
     }
-    const open = detailsState(box);
+    // 整页重画会换掉 #messages，状态必须存在实例上，不能只读当前这个盒子
+    if (!this.detailsOpen) this.detailsOpen = detailsState(box);
+    const open = this.detailsOpen;
     const parts = [];
     this.state.messages.forEach((m, index) => {
       if (m === this.reply && !this.replyVisible()) return;

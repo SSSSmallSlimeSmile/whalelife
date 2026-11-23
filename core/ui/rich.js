@@ -6,18 +6,19 @@ import { escapeHTML as e } from "./api.js";
 
 const TABLE_SEPARATOR = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 const CODE_FENCE = /^\s*(`{3,}|~{3,})(.*)$/;
-const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
+const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 const HR = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const QUOTE = /^\s{0,3}>\s?(.*)$/;
 const UL_ITEM = /^(\s*)[-*+]\s+(.*)$/;
 const OL_ITEM = /^(\s*)(\d{1,9})[.)]\s+(.*)$/;
 const LINK = /\[([^\]\n]*)\]\(([^()\s]*)\)/g;
+const INLINE_CODE = /(`+)(?!`)([^\n]*?)(?<!`)\1(?!`)/g;
 const SAFE_URL = /^(https?:\/\/|mailto:|\/|#|\.{1,2}\/)/i;
 
 /** 行内语法：行内代码 / 链接 / 粗体 / 删除线 / 斜体。入参必须已经过转义。 */
 export function inlineRich(escaped) {
   const codes = [];
-  const held = escaped.replace(/`([^`\n]+)`/g, (whole, code) => {
+  const held = escaped.replace(INLINE_CODE, (whole, run, code) => {
     codes.push(code);
     return `\u0000${codes.length - 1}\u0000`;
   });
@@ -113,7 +114,9 @@ export function renderRich(text) {
     const next = lines[i + 1];
 
     const fence = CODE_FENCE.exec(line);
-    if (fence) {
+    // 反引号围栏的 info string 里不许再有反引号（CommonMark）：
+    // 行首三个反引号包住的行内代码不是围栏，否则会把下一行吞进去
+    if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
       const marker = fence[1];
       flush();
       const lang = fence[2].trim();
@@ -136,10 +139,14 @@ export function renderRich(text) {
       continue;
     }
 
-    if (line.includes("|") && next !== undefined && next.includes("-") && TABLE_SEPARATOR.test(next)) {
+    // 表头与分隔行的格数不一致时不是表格：按普通段落处理，免得吃掉后面的列
+    const tableSeparator =
+      line.includes("|") && next !== undefined && next.includes("-") && TABLE_SEPARATOR.test(next);
+    const header = tableSeparator ? splitTableRow(line) : [];
+    const separatorCells = tableSeparator ? splitTableRow(next) : [];
+    if (tableSeparator && header.length === separatorCells.length) {
       flush();
-      const header = splitTableRow(line);
-      const aligns = splitTableRow(next).map((mark) => {
+      const aligns = separatorCells.map((mark) => {
         const left = mark.startsWith(":");
         const right = mark.endsWith(":");
         if (left && right) return "center";

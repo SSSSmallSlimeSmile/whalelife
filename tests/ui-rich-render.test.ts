@@ -82,3 +82,33 @@ test("流式分片只重画当前回复，等待气泡不再写死人名", async
   assert.match(source, /data-streaming="1"/);
   assert.doesNotMatch(source, /mini-avatar">勘</);
 });
+
+test("行首三个反引号包住的行内代码不是围栏，不吃掉下一行", async () => {
+  const { renderRich } = await load();
+  const html = renderRich(["```npm test```", "然后看测试结果。"].join("\n"));
+  assert.match(html, /<code>npm test<\/code>/);
+  assert.match(html, /然后看测试结果。/);
+  assert.doesNotMatch(html, /<pre/);
+});
+
+test("表头与分隔行格数不一致时不按表格解析，末列不丢", async () => {
+  const { renderRich } = await load();
+  const html = renderRich(["Linux | macOS", "---", "Python | Node | Go"].join("\n"));
+  assert.doesNotMatch(html, /<table/);
+  assert.match(html, /Python \| Node \| Go/);
+});
+
+test("标题里的井号是正文，结尾的闭合井号才去掉", async () => {
+  const { renderRich } = await load();
+  assert.match(renderRich("## C#"), /<h3>C#<\/h3>/);
+  assert.match(renderRich("### 标题 ###"), /<h4>标题<\/h4>/);
+});
+
+test("「查看模型原文」的展开状态存在实例上，整页重画也能保留", async () => {
+  const source = await appSource();
+  assert.match(source, /this\.detailsOpen/);
+  assert.match(source, /addEventListener\("toggle"/);
+  // 不能只在重画时读当前那个刚被换掉的盒子
+  assert.doesNotMatch(source, /const open = detailsState\(box\);/);
+  assert.match(source, /applyDetailsState\(box, open\);/);
+});
