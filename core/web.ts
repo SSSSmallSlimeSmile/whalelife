@@ -540,9 +540,11 @@ export async function startWeb(config: any, services: any, runtime: any) {
           Number.isFinite(asked) && asked > 0
             ? Math.min(Math.floor(asked), 500)
             : 40;
+        // before 给没给要分开：0 是「前面已经没有了」，不是「没给」。
+        const hasBefore = params.has("before");
         const beforeRaw = Number(params.get("before"));
         const before =
-          Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : 0;
+          hasBefore && Number.isFinite(beforeRaw) && beforeRaw >= 0 ? Math.floor(beforeRaw) : 0;
         // 页边界按「可显示的聊天消息」算：工具记录不算一页，否则整页会被前端滤空。
         // 游标是窗口第一行在整份历史里的绝对行号：往前扩窗口时同一条消息的编号不变。
         // 以前用窗口内序号当游标，翻到第三页就跳回最后一屏，最早那几页永远够不着。
@@ -552,13 +554,13 @@ export async function startWeb(config: any, services: any, runtime: any) {
         let relaxed = false;
         for (;;) {
           // 游标直接限定这次读到哪里：翻旧页不再先取文件尾巴再过滤
-        const tail = await memory.readSessionWindow(id, window, relaxed || !before ? undefined : before);
+        const tail = await memory.readSessionWindow(id, window, relaxed || !hasBefore ? undefined : before);
           // 不能按原始 type 过滤：旧渠道的 sent 回执会被投影成助手正文，
           // 按类型滤会把它整条漏掉（不分页时反而看得到）。走与 conversationRows 同一套判据。
           const marked = conversationWindows(
             tail.rows.map((row: any, index: number) => ({ row, at: tail.start + index })),
           );
-          const older = before > 0 ? marked.filter((item: any) => item.at < before) : marked;
+          const older = hasBefore ? marked.filter((item: any) => item.at < before) : marked;
           // 同一次投递的 sent 回执和正文行如果落在窗口两侧，会各冒一个气泡。
           // 往回扩窗口把它们收进同一个窗口，projection 才会去重。
           const sliceProbe = older.slice(-limit);

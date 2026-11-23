@@ -17,6 +17,7 @@ import {
 import { join, dirname, relative, resolve, sep, parse } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { StringDecoder } from "node:string_decoder";
 import type { Logger } from "./logger.ts";
 export const safeId = (id: string) => {
   if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
@@ -509,13 +510,16 @@ export class Memory {
    * start 是窗口第一行在整个会话里的行号，0 表示窗口盖到了开头。
    */
   /** 行数按 (大小, 行数) 记住：会话文件只追加，下一次数新增那段就够。 */
-  private lineCounts = new Map<string, { size: number; lines: number }>();
+  /** 每多少行记一个字节偏移：翻深页时靠它直接定位，不用从头读。 */
+  private readonly lineMark = 256;
+  private lineCounts = new Map<string, { size: number; lines: number; marks: number[] }>();
   private async countLines(file: string) {
     const info = await stat(file);
     const cached = this.lineCounts.get(file);
     if (cached && cached.size === info.size) return cached.lines;
     const from = cached && cached.size < info.size ? cached.size : 0;
     let lines = from ? cached!.lines : 0;
+    const marks = from ? cached!.marks.slice() : [0];
     const handle = await open(file, "r");
     try {
       const chunk = 1 << 16;
@@ -524,13 +528,17 @@ export class Memory {
       while (position < info.size) {
         const { bytesRead } = await handle.read(buffer, 0, Math.min(chunk, info.size - position), position);
         if (!bytesRead) break;
-        for (let i = 0; i < bytesRead; i += 1) if (buffer[i] === 10) lines += 1;
+        for (let i = 0; i < bytesRead; i += 1) {
+          if (buffer[i] !== 10) continue;
+          lines += 1;
+          if (lines % this.lineMark === 0) marks.push(position + i + 1);
+        }
         position += bytesRead;
       }
     } finally {
       await handle.close();
     }
-    this.lineCounts.set(file, { size: info.size, lines });
+    this.lineCounts.set(file, { size: info.size, lines, marks });
     return lines;
   }
   /** 只把文件末尾 wanted 行读回来：翻一页不必把整份历史重新读一遍。 */
@@ -557,20 +565,52 @@ export class Memory {
     }
   }
   /**
-   * 只解析 start..end 这一段的行。翻旧页时用 until 定住终点：
-   * 以前是先取文件尾巴再过滤，窗口一涨就把整份历史的 JSON 全 parse 一遍。
-   */
-  /**
-   * 取一段行 [from, to)。贴到文件末尾时只读尾巴；否则整份读进来再切——
-   * 但切完只解析这一段，翻旧页不该把几万行 JSON 全 parse 一遍。
+   * 取一段行 [from, to)。行号靠稀疏索引定位：每 lineMark 行记一个字节偏移，
+   * 翻深页时只读这一小截字节，不再把整份历史读进来再切。
    */
   private async segmentLines(file: string, count: number, from: number, to: number) {
     const wanted = to - from;
     if (wanted <= 0) return [] as string[];
+    const cached = this.lineCounts.get(file);
+    if (cached?.marks.length) {
+      const mark = Math.floor(from / this.lineMark);
+      const skip = from - mark * this.lineMark;
+      const slice = await this.sliceFrom(file, cached.marks[mark] ?? 0, skip + wanted);
+      const picked = slice.slice(skip, skip + wanted);
+      if (picked.length) return picked;
+    }
     if (to === count) return this.tailLines(file, wanted);
     const raw = await readFile(file, "utf8");
-    const lines = raw.split("\n").filter((line) => line.trim());
-    return lines.slice(from, to);
+    const all = raw.split("\n").filter((line) => line.trim());
+    return all.slice(from, to);
+  }
+  /** 从 byteFrom 起读够 need 行就停：只碰一页的量级，不扫文件其余部分。 */
+  private async sliceFrom(file: string, byteFrom: number, need: number) {
+    if (need <= 0) return [] as string[];
+    const info = await stat(file);
+    const handle = await open(file, "r");
+    const decoder = new StringDecoder("utf8");
+    try {
+      const chunk = 1 << 16;
+      const buffer = Buffer.alloc(chunk);
+      const rows: string[] = [];
+      let pending = "";
+      let position = byteFrom;
+      while (position < info.size && rows.length < need) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(chunk, info.size - position), position);
+        if (!bytesRead) break;
+        position += bytesRead;
+        pending += decoder.write(buffer.subarray(0, bytesRead));
+        const split = pending.split("\n");
+        pending = split.pop() ?? "";
+        for (const line of split) rows.push(line);
+      }
+      pending += decoder.end();
+      if (pending && rows.length < need) rows.push(pending);
+      return rows.slice(0, need);
+    } finally {
+      await handle.close();
+    }
   }
   async readSessionWindow(id: string, window: number, until?: number) {
     const paths = await this.episodePaths(id);
@@ -584,7 +624,9 @@ export class Memory {
     for (const file of paths) counts.push(await this.countLines(file));
     const total = counts.reduce((sum, value) => sum + value, 0);
     // until 是下一页的终点（不含）。翻旧页时只读这一截，不从文件尾巴重新取。
-    const end = Number.isFinite(until) && (until as number) > 0 ? Math.min(total, Math.floor(until as number)) : total;
+    // 游标 0 也是合法值（前面已经没有消息了）：以前当成「没给」，于是又返回最后一屏，
+    // 前端拿着 0 再翻一次就收到同一条消息，看着像卡住不动。
+    const end = Number.isFinite(until) && (until as number) >= 0 ? Math.min(total, Math.floor(until as number)) : total;
     const start = Math.max(0, end - size);
     const rows: any[] = [];
     if (start >= end) return { rows, start, total };

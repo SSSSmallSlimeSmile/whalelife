@@ -240,3 +240,60 @@ test("同一次投递的回执和正文跨页只出现一次", async () => {
     await app.close?.();
   }
 });
+
+test("深页翻历史只解析一页的量", async () => {
+  const root = await temporaryDirectory("whale-paging-deep-");
+  await mkdir(join(root, "config"));
+  await writeFile(
+    join(root, "config/config.json"),
+    JSON.stringify({
+      web: { host: "127.0.0.1", port: 19290 },
+      providers: [{ id: "local", base_url: "http://127.0.0.1:1/v1", model: "chat-a" }],
+      personas: { whale: { name: "鲸鲸", file: "memory/personas/whale.md", provider: "local", permission: "off" } },
+      channels: { web: { persona: "whale", permission: "off" } },
+      memory: { root: "memory" },
+    }),
+  );
+  const app: any = await boot(root);
+  try {
+    for (let i = 0; i < 600; i += 1)
+      await app.memory.appendEvent({ session: "deep", type: "message", role: "user", text: `第 ${i} 条` });
+
+    const url = "http://127.0.0.1:19290";
+    const login = await fetch(url + "/api/login", { method: "POST", body: "{}" });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const get = async (path: string) => (await fetch(url + path, { headers: { Cookie: cookie } })).json();
+
+    const real = JSON.parse;
+    let parsed = 0;
+    JSON.parse = ((raw: any, reviver?: any) => {
+      parsed += 1;
+      return real(raw, reviver);
+    }) as any;
+    let page: any;
+    try {
+      page = await get("/api/session?id=deep&limit=40");
+    } finally {
+      JSON.parse = real;
+    }
+    assert.equal(page.items.length, 40);
+    assert.equal(page.items.at(-1).text, "第 599 条");
+    assert.ok(parsed <= 200, `深页只该解析一页的量，不随历史长度增长，实际 ${parsed}`);
+
+    // 顺着游标往回翻，跨过 lineMark 边界时行号不能错
+    const seen: string[] = [];
+    let olderStart = page.start;
+    for (let pageIndex = 0; pageIndex < 16; pageIndex += 1) {
+      const older = await get(`/api/session?id=deep&limit=40&before=${olderStart}`);
+      if (!older.items.length) break;
+      for (const row of older.items) seen.push(row.text);
+      olderStart = older.start;
+    }
+    assert.equal(seen.length, 560, "600 条里第一页 40 条，其余 560 条应能全部翻到");
+    assert.equal(new Set(seen).size, 560, "往回翻不能有重复");
+    assert.ok(seen.includes("第 0 条"), "翻到底应能看到最早那条");
+    assert.equal(seen[0], "第 520 条", "第一页之后应接着往更早翻");
+  } finally {
+    await app.close?.();
+  }
+});
