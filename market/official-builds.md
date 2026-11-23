@@ -8,8 +8,8 @@
 
 | 插件 | 版本 | 程序文件数 | 此版验证的必需插件 |
 | --- | --- | ---: | --- |
-| QQ | 0.24.0 | 2925 | — |
-| QQ 空间 | 0.5.2 | 136 | QQ 0.22.0、0.23.0、0.24.0（最低 0.22.0） |
+| QQ | 0.25.0 | 2925 | — |
+| QQ 空间 | 0.5.2 | 136 | QQ 0.22.0、0.23.0、0.24.0、0.25.0（最低 0.22.0） |
 | 自主性 | 0.6.3 | 16 | — |
 | 图库 | 0.1.4 | 382 | — |
 | 网上冲浪 | 0.1.1 | 1239 | — |
@@ -63,7 +63,7 @@ node ./market/tools/cache-official.mjs $pluginId $source
 
 ### QQ 桌面组件
 
-QQ 0.22.0、0.23.0 和 0.24.0 桌面版使用相同的 NapCat 4.18.41 Shell、Framework 和 Frida 17.24.0 原生绑定。维护者可以使用插件作者 v0.19.3 Release 已提供的同版本原包，两项资产的 GitHub 摘要与当前 `engine.lock.json`、`desktop-engine.lock.json` 一致。第三方使用和再分发条件见插件的 `THIRD_PARTY_NOTICES.md` 与 NapCat 原许可证。[Shell 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Shell.Windows.Node.zip) · [Framework 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Framework.zip)
+QQ 0.22.0、0.23.0、0.24.0 和 0.25.0 桌面版使用相同的 NapCat 4.18.41 Shell、Framework 和 Frida 17.24.0 原生绑定。维护者可以使用插件作者 v0.19.3 Release 已提供的同版本原包，两项资产的 GitHub 摘要与当前 `engine.lock.json`、`desktop-engine.lock.json` 一致。第三方使用和再分发条件见插件的 `THIRD_PARTY_NOTICES.md` 与 NapCat 原许可证。[Shell 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Shell.Windows.Node.zip) · [Framework 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Framework.zip)
 
 0.23.0 保留了本次桌面构建中的文件换行。QQ 主程序和随包的图库入口均已从对应提交独立编译并逐字节比对。需要相同缓存字节时可直接使用本版商店附件。[QQ v0.23.0](https://github.com/iinukami/whalelife-plugin-qq/releases/tag/v0.23.0)
 
@@ -125,3 +125,5 @@ B 站 0.2.10 同时登记了公开构建和此前手动安装的文件清单。�
 在包含本次商店清单的 WhaleLife 0.1.1 隔离实例中，从空缓存下载并安装了图库 0.1.4 的公开 Windows x64 安装包。商店能识别 0.1.3 正式包和按提交 `dd04b47` 构建的 0.1.3 手装版，两者都能原地更新。两张样例原图的文件内容、标签和图库设置均保留，更新后仍可批量归档和恢复。WhaleLife 0.1.0 的隔离实例使用保留数据的卸载重装流程，也通过了相同的数据检查。
 
 另在宿主提交 `aa433167` 自带的旧商店清单上验证了远端更新检查。图库 0.1.3 正式包可直接升到 0.1.4。`dd04b47` 手装版需要先同步本次宿主商店清单，才能被识别并获得更新。
+
+2026-11-23，在 Windows x64 隔离实例中验证 QQ 0.25.0，最低宿主版本为 0.1.3。宿主 0.1.2 沿用 QQ 0.24.0。宿主 0.1.3 在商店检查、预览并确认更新后，QQ 从 0.24.0 原地升到 0.25.0，QQ 空间 0.5.2 和独立图库继续运行。通过本机模拟的 OneBot 消息和模型回复核对了同一私聊会话的人格切换。升级移除了 QQ 原先固定的人格设置，其他 QQ 配置和五项测试数据均保留。

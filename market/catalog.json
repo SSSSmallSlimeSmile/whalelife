@@ -2,7 +2,7 @@
   "official": [
     {
       "id": "qq",
-      "version": "0.24.0",
+      "version": "0.25.0",
       "name": "QQ",
       "author": "iinukami 和贡献者",
       "description": "在 QQ 私聊里延续 WhaleLife 的对话，和白名单好友收发消息。",
