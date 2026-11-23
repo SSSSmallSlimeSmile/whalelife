@@ -481,12 +481,16 @@ class ConsoleApp {
     if (!box || !id || !this.state.messages.length) return;
     if (typeof box.querySelectorAll !== "function") return;
     let index = 0;
+    let mid = "";
     let offset = 0;
     for (const node of box.querySelectorAll(".message[data-index]")) {
       const top = Number(node.offsetTop) || 0;
       const height = Number(node.offsetHeight) || 0;
       if (top + height > box.scrollTop) {
         index = Number(node.dataset.index) || 0;
+        // 序号会漂：末尾新增一条，序号对得上的其实是另一条消息。
+        // id 是那条消息自己的，翻页、追加都不会变。
+        mid = node.dataset.mid || "";
         offset = box.scrollTop - top;
         break;
       }
@@ -497,6 +501,7 @@ class ConsoleApp {
         JSON.stringify({
           count: this.state.messages.length,
           index,
+          mid,
           offset,
           start: this.state.paging ? this.state.paging.start : 0,
         }),
@@ -518,7 +523,13 @@ class ConsoleApp {
     const saved = this.pendingRestore;
     this.pendingRestore = null;
     if (!saved || !box || typeof box.querySelector !== "function") return;
-    const node = box.querySelector(`.message[data-index="${saved.index}"]`);
+    // 先按消息 id 找：这才是「当时屏幕最上面那条」，序号只是兜底。
+    let node = null;
+    if (saved.mid) {
+      const mid = String(saved.mid).replace(/["\\]/g, "");
+      node = box.querySelector(`.message[data-mid="${mid}"]`);
+    }
+    if (!node) node = box.querySelector(`.message[data-index="${saved.index}"]`);
     if (!node) return;
     this.setScrollTop(box, (Number(node.offsetTop) || 0) + (Number(saved.offset) || 0));
     this.updateRuler();
@@ -914,7 +925,7 @@ class ConsoleApp {
     box.innerHTML = this.state.messages
       .map(
         (m, index) =>
-          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
+          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}" data-mid="${e(String(m.id || index))}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
       )
       .join("");
     const stick = opts.anchor === "keep" ? false : pinBottom || prevNearBottom;
@@ -1026,7 +1037,10 @@ class ConsoleApp {
       this.rulerCount = 0;
       return;
     }
-    if (this.rulerStep !== step || this.rulerCount !== count) {
+    // 换了新的轨元素（换会话、刷新后重排版），哪怕尺寸和上次一模一样，
+    // 新元素里也是空的：只比尺寸会整条空着。所以元素变了就必须重画。
+    if (this.rulerRail !== rail || this.rulerStep !== step || this.rulerCount !== count) {
+      this.rulerRail = rail;
       this.rulerStep = step;
       this.rulerCount = count;
       const height = Math.max(box.clientHeight - 12, count * 6);
@@ -1111,6 +1125,7 @@ function messageRows(rows) {
   return rows
     .filter((row) => row.type === "message")
     .map((row) => ({
+      id: row.id,
       role: row.role,
       text: row.text,
       protocolOriginal: row.tool_protocol_original,
