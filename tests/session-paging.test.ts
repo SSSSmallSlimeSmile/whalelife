@@ -132,3 +132,53 @@ test("一直往前翻能翻到最早那条，不会翻回最后一屏", async ()
     await app.close?.();
   }
 });
+
+test("旧渠道回执里的正文不能因为分页而丢", async () => {
+  const root = await temporaryDirectory("whale-paging-receipt-");
+  await mkdir(join(root, "config"));
+  await writeFile(
+    join(root, "config/config.json"),
+    JSON.stringify({
+      web: { host: "127.0.0.1", port: 19293 },
+      providers: [{ id: "local", base_url: "http://127.0.0.1:1/v1", model: "chat-a" }],
+      personas: { whale: { name: "鲸鲸", file: "memory/personas/whale.md", provider: "local", permission: "off" } },
+      channels: { web: { persona: "whale", permission: "off" } },
+      memory: { root: "memory" },
+    }),
+  );
+  const app: any = await boot(root);
+  try {
+    await app.memory.appendEvent({ session: "receipt", type: "message", role: "user", text: "问 1" });
+    // 旧渠道：助手的话在 sent 回执里，不是 message 行
+    await app.memory.appendEvent({
+      session: "receipt",
+      type: "channel_receipt",
+      direction: "out",
+      status: "sent",
+      text: "答 1",
+      delivery_id: "d-1",
+      sent_at: new Date().toISOString(),
+      conversation: { channel: "qq" },
+    });
+    await app.memory.appendEvent({ session: "receipt", type: "message", role: "user", text: "问 2" });
+
+    const url = "http://127.0.0.1:19293";
+    const login = await fetch(url + "/api/login", { method: "POST", body: "{}" });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const get = async (path: string) =>
+      (await fetch(url + path, { headers: { Cookie: cookie } })).json();
+
+    const legacy = await get("/api/session?id=receipt");
+    assert.ok(Array.isArray(legacy));
+    assert.ok(
+      legacy.some((row: any) => row.text === "答 1"),
+      "不分页时看得到这条回执投影出来的正文",
+    );
+
+    const paged = await get("/api/session?id=receipt&limit=2");
+    const texts = paged.items.map((row: any) => row.text);
+    assert.deepEqual(texts, ["答 1", "问 2"], "分页也要按同一套投影算，不能把回执正文丢掉");
+  } finally {
+    await app.close?.();
+  }
+});

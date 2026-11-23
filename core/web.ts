@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Channels } from "./channels.ts";
-import { conversationRows } from "./channel-history.ts";
+import { conversationRows, conversationWindows } from "./channel-history.ts";
 import { PluginWebRegistry } from "./plugin-web.ts";
 import { WebClientDisconnectedError } from "./web-errors.ts";
 import { OfficialPlugins } from "./official-plugins.ts";
@@ -549,9 +549,11 @@ export async function startWeb(config: any, services: any, runtime: any) {
         let window = Math.max(limit * 3, 120);
         for (;;) {
           const tail = await memory.readSessionWindow(id, window);
-          const marked = tail.rows
-            .map((row: any, index: number) => ({ row, at: tail.start + index }))
-            .filter((item: any) => item.row.type === "message");
+          // 不能按原始 type 过滤：旧渠道的 sent 回执会被投影成助手正文，
+          // 按类型滤会把它整条漏掉（不分页时反而看得到）。走与 conversationRows 同一套判据。
+          const marked = conversationWindows(
+            tail.rows.map((row: any, index: number) => ({ row, at: tail.start + index })),
+          );
           const older = before > 0 ? marked.filter((item: any) => item.at < before) : marked;
           if (tail.start === 0 || older.length >= limit) {
             const slice = older.slice(-limit);
