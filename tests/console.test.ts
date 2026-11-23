@@ -330,10 +330,11 @@ test("console config API persists model selection, protects secrets and changes 
       "edited persona reaches the actual model request",
     );
     assert.equal(requested.at(-1), "chat-b");
-    assert.equal(
-      (await (await get("/api/session?id=console-test")).json()).items.length,
-      2,
-    );
+    // 无分页参数仍然是数组（旧契约）；显式要分页才是对象
+    assert.equal((await (await get("/api/session?id=console-test")).json()).length, 2);
+    const paged = await (await get("/api/session?id=console-test&limit=1")).json();
+    assert.equal(paged.items.length, 1);
+    assert.equal(paged.hasMore, true);
     const pluginReply = await app.llm.chat({
       model: "second",
       messages: [{ role: "user", content: "explicit registry selection" }],

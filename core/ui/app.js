@@ -427,8 +427,14 @@ class ConsoleApp {
     const sequence = ++this.sessionSync;
     const { id } = await api("/api/session/current", input ??
       (this.sessionReady ? undefined : { legacyId: localStorage.whaleSession }));
+    // 刷新时按上次读到的条数取回同样多，不然只会拿回最后一页、位置全丢
+    const savedView = this.savedView(id);
+    const want = Math.min(
+      Math.max(savedView ? Number(savedView.count) || 0 : 0, SESSION_PAGE),
+      500,
+    );
     const [page, choices] = await Promise.all([
-      api(`/api/session?id=${encodeURIComponent(id)}&limit=${SESSION_PAGE}`),
+      api(`/api/session?id=${encodeURIComponent(id)}&limit=${want}`),
       api("/api/session/list"),
     ]);
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
@@ -454,6 +460,64 @@ class ConsoleApp {
       end: page.end,
       hasMore: page.hasMore,
     };
+    // 同一会话刷新：等这一版画出来再照锚点把位置摆回去
+    this.pendingRestore =
+      savedView && !this.pendingScrollBottom && savedView.index < this.state.messages.length
+        ? savedView
+        : null;
+  }
+  // ---- 阅读位置：刷新后要能回到原处 ----
+  chatViewKey(id) {
+    return "whalelife.chatView." + (id || "");
+  }
+  /** 记下屏幕最上面那条消息和它被滚掉了多少。 */
+  saveChatView() {
+    const box = $("messages");
+    const id = this.state.session;
+    if (!box || !id || !this.state.messages.length) return;
+    if (typeof box.querySelectorAll !== "function") return;
+    let index = 0;
+    let offset = 0;
+    for (const node of box.querySelectorAll(".message[data-index]")) {
+      const top = Number(node.offsetTop) || 0;
+      const height = Number(node.offsetHeight) || 0;
+      if (top + height > box.scrollTop) {
+        index = Number(node.dataset.index) || 0;
+        offset = box.scrollTop - top;
+        break;
+      }
+    }
+    try {
+      localStorage.setItem(
+        this.chatViewKey(id),
+        JSON.stringify({
+          count: this.state.messages.length,
+          index,
+          offset,
+          start: this.state.paging ? this.state.paging.start : 0,
+        }),
+      );
+    } catch {
+      // 存不下就算了，不要因为记住位置这点事打断聊天
+    }
+  }
+  savedView(id) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.chatViewKey(id)) || "null");
+      if (!raw || !Number.isFinite(raw.index) || !Number.isFinite(raw.count)) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+  restoreChatView(box) {
+    const saved = this.pendingRestore;
+    this.pendingRestore = null;
+    if (!saved || !box || typeof box.querySelector !== "function") return;
+    const node = box.querySelector(`.message[data-index="${saved.index}"]`);
+    if (!node) return;
+    this.setScrollTop(box, (Number(node.offsetTop) || 0) + (Number(saved.offset) || 0));
+    this.updateRuler();
   }
   async refreshSessionContext() {
     const id = this.state.session;
@@ -479,7 +543,10 @@ class ConsoleApp {
       this.syncing = true;
       try {
         await this.refreshStatus();
-        if (page === "chat") await this.refreshSessionContext();
+        if (page === "chat") {
+          await this.refreshSessionContext();
+          await this.reconcileSession();
+        }
       } catch (error) {
         if (error.status === 401) this.requireLogin();
       } finally {
@@ -515,6 +582,24 @@ class ConsoleApp {
     } finally {
       this.syncing = false;
     }
+  }
+  /**
+   * 切回窗口时和服务端对一下当前会话：别的窗口换过了就跟着换，
+   * 否则这一窗还在往旧会话里发，服务端只会一直拒。
+   */
+  async reconcileSession() {
+    if (!this.state.session || this.state.chatBusy || this.sessionChanging) return;
+    let current = null;
+    try {
+      const value = await api("/api/session/current");
+      current = value && value.id;
+    } catch {
+      return;
+    }
+    if (!current || current === this.state.session) return;
+    await this.syncSession({ id: current });
+    if (this.state.page === "chat") this.render();
+    this.toast("其他窗口已切换会话，这里已跟着换过来");
   }
   async reload() {
     const button = $("refresh");
@@ -671,7 +756,17 @@ class ConsoleApp {
         }
         this.reply.text += data.text;
       } else if (data.type === "done" || data.type === "error") {
+        if (data.type === "done") this.pendingSend = null;
         if (data.type === "error") {
+          // 这条没发出去：撤掉乐观上屏的气泡，把原文放回输入框，省得重打一遍
+          const pending = this.pendingSend;
+          this.pendingSend = null;
+          if (pending && this.state.messages[pending.index]?.role === "user")
+            this.state.messages.splice(pending.index, 1);
+          if (pending && !($("chat-input")?.value || "").trim()) {
+            $("chat-input").value = pending.text;
+            this.state.chatDraft = pending.text;
+          }
           this.state.messages.push({ role: "error", text: data.error });
           this.toast(data.error, true);
         }
@@ -763,6 +858,8 @@ class ConsoleApp {
     )
       return;
     this.state.messages.push({ role: "user", text });
+    // 记下这一条，服务端没接住时好把原文放回输入框
+    this.pendingSend = { text, index: this.state.messages.length - 1 };
     this.state.chatBusy = true;
     this.state.chatDraft = "";
     this.reply = null;
@@ -809,15 +906,17 @@ class ConsoleApp {
       this.ensureChatScroll();
       return;
     }
+    // data-index 是阅读位置的锚点：刷新后靠它找回「当时屏幕最上面那条」
     box.innerHTML = this.state.messages
       .map(
-        (m) =>
-          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
+        (m, index) =>
+          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
       )
       .join("");
     const stick = opts.anchor === "keep" ? false : pinBottom || prevNearBottom;
     this.setScrollTop(box, stick ? box.scrollHeight : prevTop);
     this.ensureChatScroll();
+    if (this.pendingRestore) this.restoreChatView(box);
   }
   takeScrollPin() {
     const pin = this.pendingScrollBottom === true;
@@ -867,6 +966,9 @@ class ConsoleApp {
         "scroll",
         () => {
           this.updateRuler();
+          // 位置攒一下再写，滚动一次不要连着写几十遍 localStorage
+          if (this.viewTimer) clearTimeout(this.viewTimer);
+          this.viewTimer = setTimeout(() => this.saveChatView(), 400);
           if (box.scrollTop <= 2 && this.chatScrolled && typeof this.loadOlder === 'function')
             this.loadOlder();
         },
@@ -886,14 +988,11 @@ class ConsoleApp {
       this.rulerCount = 0;
       return;
     }
+    if (!rail.dataset) return;
+    // 量不到高度（藏着的页签、刚换过的元素）就先不动：
+    // 以前这里把 innerHTML 清空，刷新后刻度轨就整条空着，滚动也恢复不回来。
     const viewport = box.clientHeight || 0;
-    if (!rail.dataset || !viewport) {
-      rail.hidden = true;
-      rail.innerHTML = "";
-      this.rulerStep = 0;
-      this.rulerCount = 0;
-      return;
-    }
+    if (!viewport) return;
     const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
     const scrollable = box.scrollHeight - box.clientHeight;
     const count =

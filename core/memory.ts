@@ -502,6 +502,33 @@ export class Memory {
     }
     return result.slice(-limit);
   }
+  /**
+   * 只解析末尾 window 行。长会话翻页时不必把整份历史都 JSON.parse 一遍：
+   * 读文件仍然是一次顺序读，但解析量被压到一页。
+   * start 是窗口第一行在整个会话里的行号，0 表示窗口盖到了开头。
+   */
+  async readSessionWindow(id: string, window: number) {
+    const lines: string[] = [];
+    for (const file of await this.episodePaths(id)) {
+      const info = await lstat(file);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+        throw Error("记忆文件不能为链接");
+      for (const line of (await readFile(file, "utf8")).split("\n"))
+        if (line.trim()) lines.push(line);
+    }
+    const size = Math.max(1, Math.floor(window));
+    const start = Math.max(0, lines.length - size);
+    const rows: any[] = [];
+    for (let i = start; i < lines.length; i++) {
+      try {
+        rows.push(JSON.parse(lines[i]));
+      } catch {
+        if (i !== lines.length - 1) throw Error("JSONL 中间行损坏：" + id);
+        this.logger.warn("忽略 JSONL 最后半行", { file: id });
+      }
+    }
+    return { rows, start, total: lines.length };
+  }
   appendEvent(line: any, options: { once?: boolean } = {}) {
     return this.serial(async () => {
       // Check under the same write queue: a previous append may have committed

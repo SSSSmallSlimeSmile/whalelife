@@ -532,25 +532,35 @@ export async function startWeb(config: any, services: any, runtime: any) {
         const params = new URL(req.url, origin).searchParams;
         const id = params.get("id");
         if (!id) return send(400, { error: "请提供会话 ID" });
-        const rows = conversationRows(await memory.readSession(id));
+        // 不传分页参数时保持旧契约：最近 100 条的数组，旧调用方照旧能 rows.filter
+        if (!params.has("limit") && !params.has("before"))
+          return send(200, conversationRows(await memory.readSession(id)).slice(-100));
         const asked = Number(params.get("limit"));
         const limit =
           Number.isFinite(asked) && asked > 0
             ? Math.min(Math.floor(asked), 500)
             : 40;
-        const before = Number(params.get("before"));
-        const end =
-          Number.isFinite(before) && before > 0
-            ? Math.min(Math.floor(before), rows.length)
-            : rows.length;
-        const start = Math.max(0, end - limit);
-        return send(200, {
-          items: rows.slice(start, end),
-          total: rows.length,
-          start,
-          end,
-          hasMore: start > 0,
-        });
+        const beforeRaw = Number(params.get("before"));
+        const before =
+          Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : 0;
+        // 页边界按「可显示的聊天消息」算：工具记录不算一页，否则整页会被前端滤空
+        let window = Math.max(limit * 3, 120);
+        for (;;) {
+          const tail = await memory.readSessionWindow(id, window);
+          const rows = conversationRows(tail.rows).filter((row: any) => row.type === "message");
+          if (tail.start === 0 || rows.length >= before + limit) {
+            const end = before > 0 ? Math.min(before, rows.length) : rows.length;
+            const start = Math.max(0, end - limit);
+            return send(200, {
+              items: rows.slice(start, end),
+              total: rows.length + tail.start,
+              start,
+              end,
+              hasMore: start > 0 || tail.start > 0,
+            });
+          }
+          window = Math.min(window * 2, 200000);
+        }
       }
       if (req.method === "GET" && req.url === "/api/status")
         return send(200, {
