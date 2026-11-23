@@ -635,14 +635,25 @@ class ConsoleApp {
         else if (data.status === "full") this.toast("本轮补充已满，这句没进去", true);
         else if (data.status === "closed") this.toast("这一轮刚好收尾了，再发一次就成新的一轮", true);
         else this.toast(data.error || "补充没送进去", true);
-        // 没进去的补充不能留成一条看着已发出的虚线气泡，原文放回输入框
-        const pending = this.pendingNudge;
-        this.pendingNudge = null;
-        if (!entered && pending) {
-          if (this.state.messages[pending.index]?.nudge) this.state.messages.splice(pending.index, 1);
-          if (!($("chat-input")?.value || "").trim()) {
-            $("chat-input").value = pending.text;
-            this.state.chatDraft = pending.text;
+        // 没进去的补充不能留成一条看着已发出的虚线气泡，原文放回输入框。
+        // 按 messageId 找，而不是只看「最后一条待定」——done 可能比这条回执先到。
+        const pending =
+          this.pendingNudge && (!data.messageId || this.pendingNudge.messageId === data.messageId)
+            ? this.pendingNudge
+            : null;
+        if (pending) this.pendingNudge = null;
+        if (!entered) {
+          const original = pending?.text || (typeof data.text === "string" ? data.text : "");
+          if (pending) {
+            if (this.state.messages[pending.index]?.nudge) this.state.messages.splice(pending.index, 1);
+          } else if (data.messageId) {
+            // 轮到它的时候 pendingNudge 已经被 done 清掉了，从气泡里按内容撤
+            const index = this.state.messages.findLastIndex?.((m) => m.nudge && m.text === original) ?? -1;
+            if (index >= 0) this.state.messages.splice(index, 1);
+          }
+          if (original && !($("chat-input")?.value || "").trim()) {
+            $("chat-input").value = original;
+            this.state.chatDraft = original;
           }
           if (this.state.page === "chat") this.renderMessages();
         }
@@ -776,11 +787,13 @@ class ConsoleApp {
     if (!text || !this.chatConnected || $("send").disabled) return;
     // 本轮还在跑：不排队、不新起一轮，直接并进当前回合让它中途改方向。
     if (this.state.chatBusy) {
+      // 稳定 ID：同一句重送不会写出两条历史，服务端按它去重。
+      const messageId = "nudge_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
       this.chatWS.send(
-        JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text }),
+        JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text, messageId }),
       );
       this.state.messages.push({ role: "user", text, nudge: true });
-      this.pendingNudge = { text, index: this.state.messages.length - 1 };
+      this.pendingNudge = { text, index: this.state.messages.length - 1, messageId };
       this.state.chatDraft = "";
       $("chat-input").value = "";
       this.renderMessages();

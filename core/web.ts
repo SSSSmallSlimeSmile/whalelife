@@ -631,24 +631,35 @@ const webTurns = new Map<string, string>();
       // 中途插话：本轮还在跑时并进当前回合，改方向不必等下一轮。
       // 它插不进已经发出去的那批工具调用，只在下次请求模型前生效。
       if (data.append) {
-        const turnId = typeof data.turn === "string" && data.turn
-          ? data.turn
-          : webTurns.get(String(data.session ?? ""));
+        // 只认发起时那一轮的 id。以前没有就退回「本会话当前轮」，
+        // 结果是另一个窗口排队时它的补充被塞进别人的回合。
+        const turnId = typeof data.turn === "string" && data.turn ? data.turn : "";
+        const text = String(data.text ?? "");
+        const messageId =
+          typeof data.messageId === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(data.messageId)
+            ? data.messageId
+            : "web_" + randomBytes(8).toString("hex");
         const inbox = turnId ? webInboxes.get(turnId) : undefined;
+        // 没送进去的一律把原文带回去，界面据此恢复草稿——失败要看得见。
         if (!inbox) {
-          send({ type: "append", status: "closed" });
+          send({ type: "append", status: "closed", messageId, text });
+          return;
+        }
+        // 排队中的轮次还没有落盘通道：收下就等于答应了一件做不到的事。
+        if (!inbox.durable) {
+          send({ type: "append", status: "closed", messageId, text, reason: "queued" });
           return;
         }
         try {
           const result = await inbox.append({
-            messageId: "web_" + randomBytes(8).toString("hex"),
-            text: String(data.text ?? ""),
+            messageId,
+            text,
             receivedAt: new Date().toISOString(),
             timezone: timezone(config.timezone),
           });
-          send({ type: "append", status: result.status });
+          send({ type: "append", status: result.status, messageId });
         } catch (error: any) {
-          send({ type: "append", status: "rejected", error: error?.message ?? "补充失败" });
+          send({ type: "append", status: "rejected", messageId, text, error: error?.message ?? "补充失败" });
         }
         return;
       }

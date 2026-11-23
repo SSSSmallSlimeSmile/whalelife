@@ -31,6 +31,15 @@ export class TurnInput {
     return this.persistedIds.has(messageId);
   }
 
+  /**
+   * 有没有落盘通道。排队中的轮次还没轮到它跑，persister 也就没挂上——
+   * 这时收下补充等于答应了一件做不到的事：模型没跑、行也没写，进程一退就没了。
+   * 所以调用方只能在 true 的时候回 accepted。
+   */
+  get durable() {
+    return !!this.persister && !this.closed;
+  }
+
   /** 被丢弃的那段回复要从界面上撤掉，否则和存档对不上。 */
   setResetHandler(handler: () => void) {
     this.resetHandler = handler;
