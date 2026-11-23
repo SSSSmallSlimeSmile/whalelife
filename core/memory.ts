@@ -556,7 +556,23 @@ export class Memory {
       await handle.close();
     }
   }
-  async readSessionWindow(id: string, window: number) {
+  /**
+   * 只解析 start..end 这一段的行。翻旧页时用 until 定住终点：
+   * 以前是先取文件尾巴再过滤，窗口一涨就把整份历史的 JSON 全 parse 一遍。
+   */
+  /**
+   * 取一段行 [from, to)。贴到文件末尾时只读尾巴；否则整份读进来再切——
+   * 但切完只解析这一段，翻旧页不该把几万行 JSON 全 parse 一遍。
+   */
+  private async segmentLines(file: string, count: number, from: number, to: number) {
+    const wanted = to - from;
+    if (wanted <= 0) return [] as string[];
+    if (to === count) return this.tailLines(file, wanted);
+    const raw = await readFile(file, "utf8");
+    const lines = raw.split("\n").filter((line) => line.trim());
+    return lines.slice(from, to);
+  }
+  async readSessionWindow(id: string, window: number, until?: number) {
     const paths = await this.episodePaths(id);
     for (const file of paths) {
       const info = await lstat(file);
@@ -567,19 +583,27 @@ export class Memory {
     const counts: number[] = [];
     for (const file of paths) counts.push(await this.countLines(file));
     const total = counts.reduce((sum, value) => sum + value, 0);
-    const start = Math.max(0, total - size);
+    // until 是下一页的终点（不含）。翻旧页时只读这一截，不从文件尾巴重新取。
+    const end = Number.isFinite(until) && (until as number) > 0 ? Math.min(total, Math.floor(until as number)) : total;
+    const start = Math.max(0, end - size);
     const rows: any[] = [];
+    if (start >= end) return { rows, start, total };
     let cursor = 0;
     for (let index = 0; index < paths.length; index += 1) {
       const till = cursor + counts[index];
       const from = Math.max(0, start - cursor);
       cursor = till;
       if (till <= start) continue;
-      const want = Math.min(counts[index] - from, size - rows.length);
-      if (want <= 0) continue;
-      const lines = await this.tailLines(paths[index], want);
+      const base = till - counts[index];
+      const sliceFrom = Math.max(start, base) - base;
+      const sliceTo = Math.min(counts[index], end - base);
+      if (sliceTo <= sliceFrom) continue;
+      const lines = await this.segmentLines(paths[index], counts[index], sliceFrom, sliceTo);
+      const first = base + sliceFrom;
       for (let i = 0; i < lines.length; i += 1) {
-        const at = till - lines.length + i;
+        const at = first + i;
+        // 窗口外的行不解析：以前整份历史都要 JSON.parse 一遍
+        if (at < start || at >= end) continue;
         try {
           rows.push(JSON.parse(lines[i]));
         } catch {
@@ -587,7 +611,7 @@ export class Memory {
           this.logger.warn("忽略 JSONL 最后半行", { file: id });
         }
       }
-      if (rows.length >= size) break;
+      if (cursor >= end) break;
     }
     return { rows, start, total };
   }

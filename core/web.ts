@@ -547,15 +547,27 @@ export async function startWeb(config: any, services: any, runtime: any) {
         // 游标是窗口第一行在整份历史里的绝对行号：往前扩窗口时同一条消息的编号不变。
         // 以前用窗口内序号当游标，翻到第三页就跳回最后一屏，最早那几页永远够不着。
         let window = Math.max(limit * 3, 120);
+        // 投递的两半被页边界劈开时，光往回扩还不够：对方可能在前方（比游标新）。
+        // 这时放开终点再取一次，只把结果按游标过滤。
+        let relaxed = false;
         for (;;) {
-          const tail = await memory.readSessionWindow(id, window);
+          // 游标直接限定这次读到哪里：翻旧页不再先取文件尾巴再过滤
+        const tail = await memory.readSessionWindow(id, window, relaxed || !before ? undefined : before);
           // 不能按原始 type 过滤：旧渠道的 sent 回执会被投影成助手正文，
           // 按类型滤会把它整条漏掉（不分页时反而看得到）。走与 conversationRows 同一套判据。
           const marked = conversationWindows(
             tail.rows.map((row: any, index: number) => ({ row, at: tail.start + index })),
           );
           const older = before > 0 ? marked.filter((item: any) => item.at < before) : marked;
-          if (tail.start === 0 || older.length >= limit) {
+          // 同一次投递的 sent 回执和正文行如果落在窗口两侧，会各冒一个气泡。
+          // 往回扩窗口把它们收进同一个窗口，projection 才会去重。
+          const sliceProbe = older.slice(-limit);
+          const splitGroup = sliceProbe.some((item: any) => item.via === "row" && item.row?.delivery_id);
+          if (splitGroup && !relaxed) {
+            relaxed = true;
+            continue;
+          }
+          if (tail.start === 0 || (!splitGroup && older.length >= limit)) {
             const slice = older.slice(-limit);
             const start = slice.length ? slice[0].at : 0;
             const end = slice.length ? slice[slice.length - 1].at + 1 : 0;

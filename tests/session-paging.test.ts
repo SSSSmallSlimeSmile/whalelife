@@ -182,3 +182,61 @@ test("旧渠道回执里的正文不能因为分页而丢", async () => {
     await app.close?.();
   }
 });
+
+test("同一次投递的回执和正文跨页只出现一次", async () => {
+  const root = await temporaryDirectory("whale-paging-split-");
+  await mkdir(join(root, "config"));
+  await writeFile(
+    join(root, "config/config.json"),
+    JSON.stringify({
+      web: { host: "127.0.0.1", port: 19293 },
+      providers: [{ id: "local", base_url: "http://127.0.0.1:1/v1", model: "chat-a" }],
+      personas: { whale: { name: "鲸鲸", file: "memory/personas/whale.md", provider: "local", permission: "off" } },
+      channels: { web: { persona: "whale", permission: "off" } },
+      memory: { root: "memory" },
+    }),
+  );
+  const app: any = await boot(root);
+  try {
+    const { createHash } = await import("node:crypto");
+    const delivery = "delivery_split_demo";
+    const messageId = "sent_" + createHash("sha256").update(JSON.stringify(["split", delivery])).digest("hex");
+    // 正文行在前，回执在 120 条工具记录之后：同一次投递的两半被拉开
+    await app.memory.appendEvent({
+      session: "split", type: "message", role: "assistant", id: messageId,
+      text: "同一条回复", delivery_id: delivery, ts: "2026-11-23T00:00:00.000Z",
+    });
+    for (let i = 0; i < 120; i += 1)
+      await app.memory.appendEvent({ session: "split", type: "tool", text: "工具 " + i });
+    await app.memory.appendEvent({
+      session: "split", type: "channel_receipt", direction: "out", status: "sent",
+      text: "同一条回复", delivery_id: delivery, sent_at: "2026-11-23T00:00:00.000Z",
+      channel: "web", account: "local", peer: "split",
+    });
+
+    const url = "http://127.0.0.1:19293";
+    const login = await fetch(url + "/api/login", { method: "POST", body: "{}" });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const get = async (path: string) => (await fetch(url + path, { headers: { Cookie: cookie } })).json();
+
+    // 不分页：这条只出现一次（不是回执一次、正文又一次）
+    const legacy = await get("/api/session?id=split");
+    const legacyIds = legacy.filter((row: any) => row.type === "message").map((row: any) => row.id);
+    assert.deepEqual(legacyIds, [messageId]);
+
+    // 分页：一路往前翻，同一条回复只能出现一次
+    const seen: string[] = [];
+    let cursor = 0;
+    for (let guard = 0; guard < 20; guard += 1) {
+      const page = await get(`/api/session?id=split&limit=1${cursor ? "&before=" + cursor : ""}`);
+      for (const row of page.items) if (row.type === "message") seen.push(row.id);
+      if (!page.hasMore) break;
+      const next = page.start;
+      assert.notEqual(next, cursor, "游标必须往前走，否则前端会原地打转");
+      cursor = next;
+    }
+    assert.deepEqual(seen, [messageId], "跨页重复：" + JSON.stringify(seen));
+  } finally {
+    await app.close?.();
+  }
+});
