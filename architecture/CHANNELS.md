@@ -57,7 +57,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-`register({id, name?, account, persona?, permission?, send})` 返回：
+`register({id, name?, account, persona?, personaMode?, permission?, send})` 返回：
 
 | 方法 | 行为 |
 | --- | --- |
@@ -67,6 +67,7 @@ export async function apply(ctx: Context) {
 | `rebind(peer,{expectedSessionId,sessionId?})` | 显式切换会话；expectedSessionId为预期旧绑定，null表示首次；省略sessionId则显式新建；在途时拒绝迁移 |
 | `send({peer,messageId,text}, {signal?}?)` | 直接发送文本并记录回执，确认成功后将完整正文保存为同会话助手历史，不生成模型回复 |
 | `retry(peer,messageId,{direction?:'in'\|'out',signal?}?)` | 只重试已保存文本的投递；默认 in，对直接发送指定 out |
+| `currentPersona?()` | 同步读取此渠道下一轮使用的人格 ID，无需传入会话或对话对象，也不会建立会话或绑定 |
 | `context(peer)` | 获取该路由实际人格、历史范围和上下文/token 状态 |
 | `dispose()` | 注销账号、取消生命周期信号；可重复调用 |
 
@@ -144,6 +145,12 @@ if (typeof channel.openTurn !== "function") {
 
 首条和补充的原始文本先保留在各自的pending回执中，作为取消、等待中断或进程崩溃时的核对依据；会话消费后，每条只追加一次真实user历史，即使本轮调用过临时工具也不丢失真人消息。技术回执不参与历史或召回，执行档案只记录补充ID和时间，不复制补充正文。取消/停用保留已产生的动作和回执；重启后的pending或不确定结果不会自动恢复追加句柄、重放输入、工具或投递。插件需核对实际结果，再按用户授权发起新的工作。
 
+## 跟随当前人格
+
+插件在注册前检查 `ctx.channels.supportsActivePersona === true`。用户选择「跟随主干」时传入 `personaMode: "active"`，指定固定人格时只传 `persona`。两者互斥。旧宿主缺少能力标记时，可继续使用固定人格，并提示用户跟随功能需要新版宿主。
+
+跟随模式在每个新轮次接收时读取「使用配置」选中的人格，排队中的轮次保留接收时的选择。切换人格沿用已有会话及其历史范围，权限继续按本渠道原有规则计算。原轮继续完成已接纳的输入和投递。切换后向原轮补充一条新消息会返回 `closed`，插件可用同一个 `messageId` 开新轮。已接纳的消息重复提交仍按原规则去重。入站回执的 `persona_id` 记录受理该消息的人格，重试只投递先前生成的回复。
+
 ## 路由、人格与信任
 
 渠道由插件注册，不在核心维护平台枚举或按平台名称分支。`id` 是稳定渠道标识，`name` 是可选的平台显示名（1–32 个 Unicode 码点、不含控制字符），未填时显示 `id`。核心绑定实际插件归属，将平台来源写入每条消息并传给模型。来源来自注册信息，外部入站消息不能指定 `origin/platform/action` 或路由策略。显示名只是资料，不是提示词指令。
@@ -156,7 +163,7 @@ if (typeof channel.openTurn !== "function") {
 
 主干另提供 `ctx.sessions.current()` 获取与Web共用的当前会话，`sessions.run`省略sessionId时直接使用它，规则见[PLUGINS.md](PLUGINS.md)。这不改变现有渠道的持久绑定：渠道插件若按用户选择跟随当前会话，应先读取该ID，再用既有bind/rebind接口管理绑定，并处理在途冲突；不能认为Web切换会自动迁移所有旧渠道，也不能绕开独立回执重放消息。本轮不修改已有平台插件。
 
-人格与权限来源于可信注册参数，未传时读取主配置 `channels[id].accounts[account]`（存在时）或 `channels[id]`，权限再回退到人格配置，最后为 off。人格必须存在，权限只能是 off/ask/full。注册值固定在实例中；未覆盖的主配置在调用时读取。收件消息不得指定 persona、permission、session、sessionId、channel、account 或 owner。适配器负责验证外部事件，核心不会把事件中自称的账号、发送者或管理员身份当作授权。
+固定人格与权限来源于可信注册参数，未传时读取主配置 `channels[id].accounts[account]`（存在时）或 `channels[id]`，权限再回退到人格配置，最后为 off。人格必须存在，权限只能是 off/ask/full。注册值固定在实例中；未覆盖的主配置在调用时读取。收件消息不得指定 persona、permission、session、sessionId、channel、account 或 owner。适配器负责验证外部事件，核心不会把事件中自称的账号、发送者或管理员身份当作授权。
 
 安装插件在独立进程执行，但仍属于受信任代码；这些门面提供归属和生命周期约束，不是恶意代码安全沙箱。插件停止、加载失败或父插件卸载时，注册自动清理，旧门面及旧 handle 拒绝新调用。相同账号只能有一个活动注册，持久绑定也保存原插件归属。
 
