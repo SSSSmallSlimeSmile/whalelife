@@ -2190,7 +2190,7 @@ dialog::backdrop {
 
 /* 思考中提示 */
 .bubble.thinking { display: inline-flex; align-items: center; gap: 5px; color: #8a8f98; letter-spacing: 0.02em; }
-.bubble.thinking i { font-style: normal; animation: think-dot 1.2s infinite ease-in-out; }
+.bubble.thinking i { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: currentColor; font-style: normal; animation: think-dot 1.2s infinite ease-in-out; }
 .bubble.thinking i:nth-child(2) { animation-delay: 0.15s; }
 .bubble.thinking i:nth-child(3) { animation-delay: 0.3s; }
 .bubble.thinking span { margin-left: 4px; animation: think-fade 1.8s infinite ease-in-out; }

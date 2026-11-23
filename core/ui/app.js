@@ -434,7 +434,11 @@ class ConsoleApp {
     ]);
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
     this.sessionReady = true;
-    if (this.state.session !== id) this.state.sessionContext = null;
+    if (this.state.session !== id) {
+      this.state.sessionContext = null;
+      // 换个会话，上一份「查看模型原文」的展开状态就不作数了
+      this.detailsOpen = new Set();
+    }
     this.state.session = id;
     this.state.sessions = choices.items;
     this.state.sessionName = choices.items.find(item => item.id === id)?.name || id;
@@ -447,6 +451,8 @@ class ConsoleApp {
     this.state.messages = rows
       .filter((r) => r.type === "message")
       .map((r) => ({
+        // id 用来给「查看模型原文」的展开状态做稳定身份，缺了退回序号
+        id: r.id,
         role: r.role,
         text: r.text,
         protocolOriginal: r.tool_protocol_original,
@@ -785,19 +791,20 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
-  /** 「查看模型原文」的展开状态：按「消息序号:第几个 details」记，跨整页重画保留。 */
+  /** 「查看模型原文」的展开状态：按「会话:消息身份:第几个 details」记，跨整页重画保留。 */
   rememberDetails(event) {
     const details = event && event.target;
     if (!details || details.tagName !== "DETAILS") return;
     const node = details.closest ? details.closest(".message[data-index]") : null;
     if (!node) return;
-    const index = node.dataset ? node.dataset.index : undefined;
-    if (index === undefined) return;
+    const data = node.dataset || {};
+    const identity = data.detailKey !== undefined ? data.detailKey : data.index === undefined ? undefined : "i" + data.index;
+    if (identity === undefined) return;
     const list = Array.from(node.querySelectorAll("details"));
     const offset = list.indexOf(details);
     if (offset < 0) return;
     if (!this.detailsOpen) this.detailsOpen = new Set();
-    const key = index + ":" + offset;
+    const key = identity + ":" + offset;
     if (details.open) this.detailsOpen.add(key);
     else this.detailsOpen.delete(key);
   }
@@ -809,6 +816,8 @@ class ConsoleApp {
     const personaName = this.state.status.personaName || "助手";
     const box = $("messages");
     if (!box) return;
+    // 会话前缀进键里：两个会话的第 1 条不会撞同一个键
+    const keyOf = (m, index) => (this.state.session || "-") + ":" + (m.id || "i" + index);
     if (!this.state.messages.length) {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
       return;
@@ -820,7 +829,7 @@ class ConsoleApp {
     this.state.messages.forEach((m, index) => {
       if (m === this.reply && !this.replyVisible()) return;
       parts.push(
-        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
+        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}" data-detail-key="${e(keyOf(m, index))}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
       );
     });
     box.innerHTML = parts.join("");

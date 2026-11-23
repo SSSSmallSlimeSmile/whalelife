@@ -226,15 +226,23 @@ export const hasVisibleText = (text) => Boolean(String(text ?? "").trim());
 /** 等待气泡用和回复同一个头像字。 */
 export const avatarLabel = (personaName) => String(personaName || "助手").slice(0, 1);
 
-/** 记住哪些「查看模型原文」是展开的：按消息序号 + 第几个 details 记。 */
+/** 展开状态的键：优先用页面给的 data-detail-key（会话 + 消息身份），没有就退回序号。 */
+const detailKeyOf = (node) => {
+  const data = node?.dataset;
+  if (!data) return undefined;
+  if (data.detailKey !== undefined) return data.detailKey;
+  return data.index === undefined ? undefined : "i" + data.index;
+};
+
+/** 记住哪些「查看模型原文」是展开的：按消息身份 + 第几个 details 记。 */
 export function detailsState(box) {
   const state = new Set();
   if (!box || typeof box.querySelectorAll !== "function") return state;
   box.querySelectorAll(".message[data-index]").forEach((node) => {
-    const index = node?.dataset ? node.dataset.index : undefined;
-    if (index === undefined) return;
+    const key = detailKeyOf(node);
+    if (key === undefined) return;
     node.querySelectorAll("details").forEach((details, offset) => {
-      if (details.open) state.add(`${index}:${offset}`);
+      if (details.open) state.add(`${key}:${offset}`);
     });
   });
   return state;
@@ -243,10 +251,10 @@ export function detailsState(box) {
 export function applyDetailsState(box, state) {
   if (!box || !state || !state.size || typeof box.querySelectorAll !== "function") return;
   box.querySelectorAll(".message[data-index]").forEach((node) => {
-    const index = node?.dataset ? node.dataset.index : undefined;
-    if (index === undefined) return;
+    const key = detailKeyOf(node);
+    if (key === undefined) return;
     node.querySelectorAll("details").forEach((details, offset) => {
-      if (state.has(`${index}:${offset}`)) details.open = true;
+      if (state.has(`${key}:${offset}`)) details.open = true;
     });
   });
 }

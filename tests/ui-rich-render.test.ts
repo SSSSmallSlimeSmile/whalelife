@@ -4,18 +4,19 @@ import { readFile } from "node:fs/promises";
 
 const load = () => import(new URL("../core/ui/rich.js", import.meta.url).href);
 const appSource = () => readFile(new URL("../core/ui/app.js", import.meta.url), "utf8");
+const cssSource = () => readFile(new URL("../core/ui/styles.css", import.meta.url), "utf8");
 
 /** 只实现 detailsState / applyDetailsState 用到的那点 DOM 形状。 */
 type StubDetails = { open: boolean };
 type StubMessage = {
-  dataset: { index: string };
+  dataset: { index: string; detailKey?: string };
   querySelectorAll: (selector: string) => StubDetails[];
 };
 const boxOf = (messages: StubMessage[]) => ({
   querySelectorAll: (selector: string) => (selector === ".message[data-index]" ? messages : []),
 });
-const messageOf = (index: number, details: StubDetails[]): StubMessage => ({
-  dataset: { index: String(index) },
+const messageOf = (index: number, details: StubDetails[], detailKey?: string): StubMessage => ({
+  dataset: detailKey === undefined ? { index: String(index) } : { index: String(index), detailKey },
   querySelectorAll: (selector: string) => (selector === "details" ? details : []),
 });
 
@@ -61,6 +62,30 @@ test("重画消息列表时保留「查看模型原文」的展开状态", async
   const after = boxOf([messageOf(0, [{ open: false }]), messageOf(1, [{ open: false }])]);
   applyDetailsState(after, state);
   assert.equal(after.querySelectorAll(".message[data-index]")[1].querySelectorAll("details")[0].open, true);
+});
+
+test("两个会话同序号的「查看模型原文」不共用展开状态", async () => {
+  const { detailsState, applyDetailsState } = await load();
+  // A 会话的第 1 条展开着
+  const state = detailsState(boxOf([messageOf(1, [{ open: true }], "sessionA:m1")]));
+  assert.deepEqual([...state], ["sessionA:m1:0"]);
+  // 切到 B 会话，同样在第 1 条，不该跟着展开
+  const after = boxOf([messageOf(1, [{ open: false }], "sessionB:m1")]);
+  applyDetailsState(after, state);
+  assert.equal(after.querySelectorAll(".message[data-index]")[0].querySelectorAll("details")[0].open, false);
+  // 回到 A，展开状态还在
+  const back = boxOf([messageOf(1, [{ open: false }], "sessionA:m1")]);
+  applyDetailsState(back, state);
+  assert.equal(back.querySelectorAll(".message[data-index]")[0].querySelectorAll("details")[0].open, true);
+});
+
+test("没有 detail-key 时退回序号，旧行为不变", async () => {
+  const { detailsState, applyDetailsState } = await load();
+  const state = detailsState(boxOf([messageOf(2, [{ open: true }])]));
+  assert.deepEqual([...state], ["i2:0"]);
+  const after = boxOf([messageOf(2, [{ open: false }])]);
+  applyDetailsState(after, state);
+  assert.equal(after.querySelectorAll(".message[data-index]")[0].querySelectorAll("details")[0].open, true);
 });
 
 test("只有空白的首个分片不撤掉等待气泡，头像跟着人格名", async () => {
@@ -111,4 +136,18 @@ test("「查看模型原文」的展开状态存在实例上，整页重画也�
   // 不能只在重画时读当前那个刚被换掉的盒子
   assert.doesNotMatch(source, /const open = detailsState\(box\);/);
   assert.match(source, /applyDetailsState\(box, open\);/);
+  // 键里带会话前缀，切会话时还要清空，两处都得在
+  assert.match(source, /data-detail-key="\$\{e\(keyOf\(m, index\)\)\}"/);
+  assert.match(source, /const keyOf = \(m, index\) => \(this\.state\.session \|\| "-"\)/);
+  assert.match(source, /this\.detailsOpen = new Set\(\);/);
+});
+
+test("思考中那三个点是实心小圆点，不是零尺寸的空标签", async () => {
+  const css = await cssSource();
+  const rule = css.match(/\.bubble\.thinking i \{[^}]*\}/);
+  assert.ok(rule, "找不到 .bubble.thinking i 的样式");
+  assert.match(rule[0], /display:\s*inline-block/);
+  assert.match(rule[0], /width:\s*5px/);
+  assert.match(rule[0], /height:\s*5px/);
+  assert.match(rule[0], /background:/);
 });
