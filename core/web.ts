@@ -543,20 +543,27 @@ export async function startWeb(config: any, services: any, runtime: any) {
         const beforeRaw = Number(params.get("before"));
         const before =
           Number.isFinite(beforeRaw) && beforeRaw > 0 ? Math.floor(beforeRaw) : 0;
-        // 页边界按「可显示的聊天消息」算：工具记录不算一页，否则整页会被前端滤空
+        // 页边界按「可显示的聊天消息」算：工具记录不算一页，否则整页会被前端滤空。
+        // 游标是窗口第一行在整份历史里的绝对行号：往前扩窗口时同一条消息的编号不变。
+        // 以前用窗口内序号当游标，翻到第三页就跳回最后一屏，最早那几页永远够不着。
         let window = Math.max(limit * 3, 120);
         for (;;) {
           const tail = await memory.readSessionWindow(id, window);
-          const rows = conversationRows(tail.rows).filter((row: any) => row.type === "message");
-          if (tail.start === 0 || rows.length >= before + limit) {
-            const end = before > 0 ? Math.min(before, rows.length) : rows.length;
-            const start = Math.max(0, end - limit);
+          const marked = tail.rows
+            .map((row: any, index: number) => ({ row, at: tail.start + index }))
+            .filter((item: any) => item.row.type === "message");
+          const older = before > 0 ? marked.filter((item: any) => item.at < before) : marked;
+          if (tail.start === 0 || older.length >= limit) {
+            const slice = older.slice(-limit);
+            const start = slice.length ? slice[0].at : 0;
+            const end = slice.length ? slice[slice.length - 1].at + 1 : 0;
             return send(200, {
-              items: rows.slice(start, end),
-              total: rows.length + tail.start,
+              items: slice.map((item: any) => item.row),
+              total: tail.total,
               start,
               end,
-              hasMore: start > 0 || tail.start > 0,
+              // 窗口还没退到文件头，或者裁掉的部分里还有消息，才算「前面还有」
+              hasMore: tail.start > 0 || older.length > slice.length,
             });
           }
           window = Math.min(window * 2, 200000);

@@ -9,6 +9,7 @@ import {
   writeFile,
   rename,
   readdir,
+  open,
   stat,
   lstat,
   unlink,
@@ -507,27 +508,88 @@ export class Memory {
    * 读文件仍然是一次顺序读，但解析量被压到一页。
    * start 是窗口第一行在整个会话里的行号，0 表示窗口盖到了开头。
    */
+  /** 行数按 (大小, 行数) 记住：会话文件只追加，下一次数新增那段就够。 */
+  private lineCounts = new Map<string, { size: number; lines: number }>();
+  private async countLines(file: string) {
+    const info = await stat(file);
+    const cached = this.lineCounts.get(file);
+    if (cached && cached.size === info.size) return cached.lines;
+    const from = cached && cached.size < info.size ? cached.size : 0;
+    let lines = from ? cached!.lines : 0;
+    const handle = await open(file, "r");
+    try {
+      const chunk = 1 << 16;
+      const buffer = Buffer.alloc(chunk);
+      let position = from;
+      while (position < info.size) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(chunk, info.size - position), position);
+        if (!bytesRead) break;
+        for (let i = 0; i < bytesRead; i += 1) if (buffer[i] === 10) lines += 1;
+        position += bytesRead;
+      }
+    } finally {
+      await handle.close();
+    }
+    this.lineCounts.set(file, { size: info.size, lines });
+    return lines;
+  }
+  /** 只把文件末尾 wanted 行读回来：翻一页不必把整份历史重新读一遍。 */
+  private async tailLines(file: string, wanted: number) {
+    const info = await stat(file);
+    if (!info.size || wanted <= 0) return [] as string[];
+    const handle = await open(file, "r");
+    try {
+      let span = Math.max(1 << 16, wanted * 256);
+      for (;;) {
+        const from = Math.max(0, info.size - span);
+        const buffer = Buffer.alloc(info.size - from);
+        await handle.read(buffer, 0, buffer.length, from);
+        const lines = buffer.toString("utf8").split("\n").filter((line) => line.trim());
+        if (from === 0 || lines.length >= wanted) {
+          // 从中间读起时第一行多半是被截断的半行，丢掉
+          if (from > 0 && lines.length) lines.shift();
+          return lines.slice(-wanted);
+        }
+        span *= 2;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
   async readSessionWindow(id: string, window: number) {
-    const lines: string[] = [];
-    for (const file of await this.episodePaths(id)) {
+    const paths = await this.episodePaths(id);
+    for (const file of paths) {
       const info = await lstat(file);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
         throw Error("记忆文件不能为链接");
-      for (const line of (await readFile(file, "utf8")).split("\n"))
-        if (line.trim()) lines.push(line);
     }
     const size = Math.max(1, Math.floor(window));
-    const start = Math.max(0, lines.length - size);
+    const counts: number[] = [];
+    for (const file of paths) counts.push(await this.countLines(file));
+    const total = counts.reduce((sum, value) => sum + value, 0);
+    const start = Math.max(0, total - size);
     const rows: any[] = [];
-    for (let i = start; i < lines.length; i++) {
-      try {
-        rows.push(JSON.parse(lines[i]));
-      } catch {
-        if (i !== lines.length - 1) throw Error("JSONL 中间行损坏：" + id);
-        this.logger.warn("忽略 JSONL 最后半行", { file: id });
+    let cursor = 0;
+    for (let index = 0; index < paths.length; index += 1) {
+      const till = cursor + counts[index];
+      const from = Math.max(0, start - cursor);
+      cursor = till;
+      if (till <= start) continue;
+      const want = Math.min(counts[index] - from, size - rows.length);
+      if (want <= 0) continue;
+      const lines = await this.tailLines(paths[index], want);
+      for (let i = 0; i < lines.length; i += 1) {
+        const at = till - lines.length + i;
+        try {
+          rows.push(JSON.parse(lines[i]));
+        } catch {
+          if (at !== total - 1) throw Error("JSONL 中间行损坏：" + id);
+          this.logger.warn("忽略 JSONL 最后半行", { file: id });
+        }
       }
+      if (rows.length >= size) break;
     }
-    return { rows, start, total: lines.length };
+    return { rows, start, total };
   }
   appendEvent(line: any, options: { once?: boolean } = {}) {
     return this.serial(async () => {

@@ -422,10 +422,14 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
-  async syncSession(input) {
+  async syncSession(input, options = {}) {
     if (this.state.chatBusy || (!input && this.sessionChanging)) return;
     const sequence = ++this.sessionSync;
-    const { id } = await api("/api/session/current", input ??
+    // adopt：别的窗口已经切了会话，这里只跟着显示，不再回写服务端，
+    // 否则两个窗口每次聚焦都把对方拽回来。
+    const { id } = options.adopt && input && input.id
+      ? { id: input.id }
+      : await api("/api/session/current", input ??
       (this.sessionReady ? undefined : { legacyId: localStorage.whaleSession }));
     // 刷新时按上次读到的条数取回同样多，不然只会拿回最后一页、位置全丢
     const savedView = this.savedView(id);
@@ -597,7 +601,7 @@ class ConsoleApp {
       return;
     }
     if (!current || current === this.state.session) return;
-    await this.syncSession({ id: current });
+    await this.syncSession({ id: current }, { adopt: true });
     if (this.state.page === "chat") this.render();
     this.toast("其他窗口已切换会话，这里已跟着换过来");
   }
@@ -975,6 +979,13 @@ class ConsoleApp {
         { passive: true },
       );
     }
+    // 排版早晚会变（换页、窗口缩放、刷新后第一次排版），插个观察者补一次刻度。
+    if (box.dataset && box.dataset.resizerBound !== "1" && typeof ResizeObserver === "function") {
+      box.dataset.resizerBound = "1";
+      this.rulerObserver?.disconnect?.();
+      this.rulerObserver = new ResizeObserver(() => this.updateRuler());
+      this.rulerObserver.observe(box);
+    }
     this.updateRuler();
   }
   updateRuler() {
@@ -992,7 +1003,16 @@ class ConsoleApp {
     // 量不到高度（藏着的页签、刚换过的元素）就先不动：
     // 以前这里把 innerHTML 清空，刷新后刻度轨就整条空着，滚动也恢复不回来。
     const viewport = box.clientHeight || 0;
-    if (!viewport) return;
+    // 刚刷新时消息区还没排版，量到的是 0：过一帧重量，别把轨留成空的。
+    if (!viewport) {
+      if (!this.rulerRetry) {
+        this.rulerRetry = setTimeout(() => {
+          this.rulerRetry = 0;
+          this.updateRuler();
+        }, 60);
+      }
+      return;
+    }
     const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
     const scrollable = box.scrollHeight - box.clientHeight;
     const count =
