@@ -46,6 +46,8 @@ export async function startWeb(config: any, services: any, runtime: any) {
   // 本轮输入信箱：本轮还在跑时网页端可以往里塞话，等下一次请求模型前生效。
   // 按「轮」存，不按会话：两个窗口同时跑同一会话时，A 的补充不会落进 B 的回合。
 const webInboxes = new Map<string, TurnInput>();
+/** 每一轮一个中止器：补充落盘失败就把这一轮掐掉，别让没读到补充的回复发出去。 */
+const webTurnAborts = new Map<string, AbortController>();
 // 给不带 turn 的旧客户端兜底：会话 → 最近一轮的 turn id
 const webTurns = new Map<string, string>();
   const reviewedPackages = async () => {
@@ -660,6 +662,9 @@ const webTurns = new Map<string, string>();
           send({ type: "append", status: result.status, messageId });
         } catch (error: any) {
           send({ type: "append", status: "rejected", messageId, text, error: error?.message ?? "补充失败" });
+          // 这条补充没落盘，模型这一轮就看不到它。继续跑等于把一条没读到补充的回复发出去。
+          // 中止本轮，让上层按「生成失败」收尾——基线就是这个行为。
+          webTurnAborts.get(turnId)?.abort(error);
         }
         return;
       }
@@ -673,16 +678,18 @@ const webTurns = new Map<string, string>();
           (data.session !== data.expectedSession || data.expectedSession !== await sessions.current({}, lifetime.signal)))
           throw Error("当前会话已在其他窗口切换，请刷新后重试");
         const typed = String(data.text ?? "");
+        const turnAbort = new AbortController();
         const inbox = new TurnInput({
           messageId: "web_" + randomBytes(8).toString("hex"),
           text: typed,
           receivedAt: new Date().toISOString(),
           timezone: timezone(config.timezone),
-        }, lifetime.signal);
+        }, AbortSignal.any([lifetime.signal, turnAbort.signal]));
         // 被丢弃的那段回复要能从界面上撤掉
         inbox.setResetHandler(() => send({ type: "reset" }));
         const turnId = "t_" + randomBytes(8).toString("hex");
         webInboxes.set(turnId, inbox);
+        webTurnAborts.set(turnId, turnAbort);
         webTurns.set(String(data.session), turnId);
         send({ type: "started", turn: turnId });
         try {
@@ -697,6 +704,7 @@ const webTurns = new Map<string, string>();
         } finally {
           inbox.closeInput();
           webInboxes.delete(turnId);
+          webTurnAborts.delete(turnId);
           if (webTurns.get(String(data.session)) === turnId) webTurns.delete(String(data.session));
         }
         send({ type: "done" });

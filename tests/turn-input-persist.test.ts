@@ -103,9 +103,45 @@ test("前端带稳定 messageId，并按它把没进去的补充放回输入框"
   assert.match(source, /this\.turn = typeof data\.turn === "string" \? data\.turn : null;/);
   assert.match(source, /text, messageId \}\)/);
   assert.match(source, /const messageId = "nudge_" \+ Date\.now\(\)\.toString\(36\)/);
-  assert.match(source, /this\.pendingNudge = \{ text, index: this\.state\.messages\.length - 1, messageId \};/);
+  assert.match(source, /this\.pendingNudge = \{ text, nudgeId, messageId \};/);
+  // 连续两条被拒时按序号删会错位：消息带 nudgeId，撤回按它走
+  assert.match(source, /this\.state\.messages = this\.state\.messages\.filter\(\(m\) => m\.nudgeId !== nudgeId\)/);
   // done 可能比 closed 先到：回执按 messageId 找原文，而不是只看「最后一条待定」
   assert.match(source, /this\.pendingNudge\.messageId === data\.messageId/);
-  assert.ok(source.includes('$("chat-input").value = original;'));
+  // 输入框空着才放回去；已经有草稿就排进「未送达」，别把用户新写的挤掉
+  assert.ok(source.includes("box.value = original;"));
+  assert.ok(source.includes('(this.unsentNudges ||= []).push({ text: original, messageId: data.messageId || "" });'));
+  // 等回执时切走页面，$("chat-input") 是 null：不能再对着它赋值
+  assert.ok(!source.includes('$("chat-input").value = original;'));
   assert.match(source, /if \(data\.type === "reset"\)/);
+});
+
+test("补充落盘失败要把这一轮掐掉，而不是照常把回复发出去", async () => {
+  const source = await webSource();
+  // 每一轮单独一个中止器，和宿主生命周期信号一起并给 TurnInput
+  assert.match(source, /const webTurnAborts = new Map<string, AbortController>\(\);/);
+  assert.match(source, /AbortSignal\.any\(\[lifetime\.signal, turnAbort\.signal\]\)/);
+  assert.match(source, /webTurnAborts\.set\(turnId, turnAbort\);/);
+  assert.match(source, /webTurnAborts\.delete\(turnId\);/);
+  // 落盘失败 → 中止本轮。基线就是这么收尾的（generation_failed、不发送）
+  assert.match(source, /webTurnAborts\.get\(turnId\)\?\.abort\(error\);/);
+  // 中止之后仍要把 rejected 回给界面，原文才能放回去
+  const rejected = source.indexOf('status: "rejected"');
+  const abort = source.indexOf("webTurnAborts.get(turnId)?.abort(error);");
+  assert.ok(rejected > 0 && abort > rejected, "先回 rejected，再中止");
+});
+
+test("被拒的原文有处可放：输入框空着就放回去，否则排进「未送达」", async () => {
+  const source = await appSource();
+  assert.match(source, /if \(box && !\(box\.value \|\| ""\)\.trim\(\)\)/);
+  assert.match(source, /\(this\.unsentNudges \|\|= \[\]\)\.push\(\{ text: original, messageId: data\.messageId \|\| "" \}\);/);
+  assert.match(source, /data-nudge-resend/);
+  assert.match(source, /data-nudge-drop/);
+  // 切走页面时输入框不在，别对着 null 赋值
+  assert.ok(!source.includes('$("chat-input").value = original;'));
+});
+
+test("「未送达」条和消息容器是同一个节点时不动手", async () => {
+  const source = await appSource();
+  assert.match(source, /if \(!bar \|\| bar === \$\("messages"\)\) return;/);
 });

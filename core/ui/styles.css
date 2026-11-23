@@ -1680,6 +1680,29 @@ html:has(#store-drawer[open]) { overflow: hidden; }
   background: #fff3f4;
   color: #b04b58;
 }
+/* 补充被拒、又没处放的原文排在这里：能重发，也能显式丢掉。 */
+.nudge-unsent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  border: 1px dashed #c5ac72;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.nudge-unsent-label { font-weight: 600; }
+.nudge-unsent-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(197, 172, 114, 0.16);
+  max-width: 100%;
+}
+
 .composer {
   border-top: 1px solid var(--line);
   padding: 16px 22px;

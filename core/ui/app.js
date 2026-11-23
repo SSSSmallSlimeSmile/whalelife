@@ -644,16 +644,23 @@ class ConsoleApp {
         if (pending) this.pendingNudge = null;
         if (!entered) {
           const original = pending?.text || (typeof data.text === "string" ? data.text : "");
-          if (pending) {
-            if (this.state.messages[pending.index]?.nudge) this.state.messages.splice(pending.index, 1);
-          } else if (data.messageId) {
+          // 按 nudgeId 撤：连续两条被拒时按序号删会错位，删掉别人那条
+          const nudgeId = pending?.nudgeId || "";
+          if (nudgeId) this.state.messages = this.state.messages.filter((m) => m.nudgeId !== nudgeId);
+          else if (data.messageId) {
             // 轮到它的时候 pendingNudge 已经被 done 清掉了，从气泡里按内容撤
             const index = this.state.messages.findLastIndex?.((m) => m.nudge && m.text === original) ?? -1;
             if (index >= 0) this.state.messages.splice(index, 1);
           }
-          if (original && !($("chat-input")?.value || "").trim()) {
-            $("chat-input").value = original;
-            this.state.chatDraft = original;
+          // 原文不能丢：输入框空着就放回去；已经有草稿就排进「未送达」，让用户决定重发还是丢弃
+          if (original) {
+            const box = $("chat-input");
+            if (box && !(box.value || "").trim()) {
+              box.value = original;
+              this.state.chatDraft = original;
+            } else {
+              (this.unsentNudges ||= []).push({ text: original, messageId: data.messageId || "" });
+            }
           }
           if (this.state.page === "chat") this.renderMessages();
         }
@@ -792,8 +799,9 @@ class ConsoleApp {
       this.chatWS.send(
         JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text, messageId }),
       );
-      this.state.messages.push({ role: "user", text, nudge: true });
-      this.pendingNudge = { text, index: this.state.messages.length - 1, messageId };
+      const nudgeId = "n_" + messageId;
+      this.state.messages.push({ role: "user", text, nudge: true, nudgeId });
+      this.pendingNudge = { text, nudgeId, messageId };
       this.state.chatDraft = "";
       $("chat-input").value = "";
       this.renderMessages();
@@ -846,6 +854,53 @@ class ConsoleApp {
       )
       .join("");
     box.scrollTop = box.scrollHeight;
+    this.renderUnsentNudges();
+  }
+  /** 被拒且没处放的补充排在这里：能重发，也能显式丢掉。不碰输入框里正在写的草稿。 */
+  renderUnsentNudges() {
+    const bar = $("nudge-unsent");
+    // 页面没渲染这一块，或者和消息容器是同一个节点（桩环境里常见），就别碰它，
+    // 否则清空自己就等于把正文一起擦了。
+    if (!bar || bar === $("messages")) return;
+    const list = this.unsentNudges || [];
+    if (!list.length) {
+      bar.hidden = true;
+      bar.innerHTML = "";
+      return;
+    }
+    bar.hidden = false;
+    bar.innerHTML =
+      `<span class="nudge-unsent-label">没送进去 ${list.length} 条</span>` +
+      list
+        .map(
+          (item, index) =>
+            `<span class="nudge-unsent-item" title="${e(item.text)}">${e(item.text.length > 24 ? item.text.slice(0, 24) + "…" : item.text)}` +
+            `<button type="button" class="btn small" data-nudge-resend="${index}">重发</button>` +
+            `<button type="button" class="btn small" data-nudge-drop="${index}">丢弃</button></span>`,
+        )
+        .join("");
+    if (bar.dataset.bound) return;
+    bar.dataset.bound = "1";
+    bar.addEventListener("click", (event) => {
+      const resend = event.target.closest("[data-nudge-resend]");
+      const drop = event.target.closest("[data-nudge-drop]");
+      if (!resend && !drop) return;
+      const index = Number((resend || drop).dataset[resend ? "nudgeResend" : "nudgeDrop"]);
+      const item = (this.unsentNudges || [])[index];
+      if (!item) return;
+      if (drop) {
+        this.unsentNudges.splice(index, 1);
+        this.renderUnsentNudges();
+        return;
+      }
+      this.unsentNudges.splice(index, 1);
+      const box = $("chat-input");
+      if (!box) return;
+      box.value = box.value.trim() ? item.text + "\n" + box.value : item.text;
+      this.state.chatDraft = box.value;
+      this.renderUnsentNudges();
+      box.focus();
+    });
   }
   filteredLogs() {
     return this.state.logs.filter(
