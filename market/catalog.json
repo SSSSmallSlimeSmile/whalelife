@@ -109,10 +109,10 @@
     },
     {
       "id": "schedule",
-      "version": "0.6.0",
+      "version": "0.8.2",
       "name": "日程",
       "author": "FelixTaXk",
-      "description": "按作息生成每日日程，可查看、编辑并保存。公开版 WhaleLife 支持这些功能。若要在每轮聊天中自动加入当前和下一项日程，需要作者提供的宿主补丁。",
+      "description": "按作息、节假日、调休和旅行安排生成每日日程，可在控制台编辑和保存。安装包包含天气和衣柜。聊天时逐轮注入日程需要宿主提供 context 服务。",
       "repository": "https://github.com/FelixTaXk/whalelife-community-schedule",
       "installation": "https://github.com/FelixTaXk/whalelife-community-schedule/blob/main/README.md#手动安装",
       "feedback": "https://github.com/FelixTaXk/whalelife-community-schedule/issues",
@@ -120,6 +120,20 @@
       "collected": "2026-11-21",
       "stars": 0,
       "verifiedReleases": [
+        {
+          "version": "0.8.2",
+          "hostRange": "0.1.1",
+          "platform": "win32",
+          "arch": "x64",
+          "dependencies": {},
+          "assetUrl": "https://github.com/FelixTaXk/whalelife-community-schedule/releases/download/v0.8.2/schedule-0.8.2.wlpkg.gz",
+          "sizeBytes": 1993603,
+          "sha256": "700c95dae0beb585703c4f9fe580038140386154c9d4daf8d7cef5cfbde946fc",
+          "bundledPluginIds": [
+            "schedule/weather",
+            "schedule/wardrobe"
+          ]
+        },
         {
           "version": "0.6.0",
           "hostRange": "0.1.1",
@@ -148,7 +162,7 @@
     },
     {
       "id": "voice",
-      "version": "0.13.1",
+      "version": "0.15.0",
       "name": "语音模块",
       "author": "FelixTaXk",
       "description": "管理音色库，合成语音并转换歌声。一键安装包含说话和唱歌两个子插件。使用本机语音引擎时，还需在插件设置中单独部署。",
@@ -159,6 +173,20 @@
       "collected": "2026-11-21",
       "stars": 0,
       "verifiedReleases": [
+        {
+          "version": "0.15.0",
+          "hostRange": "0.1.2",
+          "platform": "win32",
+          "arch": "x64",
+          "assetUrl": "https://github.com/FelixTaXk/whalelife-community-voice/releases/download/v0.15.0/voice-0.15.0-win32-x64.wlpkg.gz",
+          "sizeBytes": 78040,
+          "sha256": "de7e4a4942fb9f0ae3538a88d7dd4b26ca1082fc1dec3a85eefcf16bdecf554c",
+          "dependencies": {},
+          "bundledPluginIds": [
+            "voice/speak",
+            "voice/sing"
+          ]
+        },
         {
           "version": "0.13.1",
           "hostRange": "0.1.1",
@@ -340,6 +368,31 @@
           "assetUrl": "https://github.com/FelixTaXk/whalelife-community-qq-group/releases/download/v0.6.10/qq-group-0.6.10-win32-x64.wlpkg.gz",
           "sha256": "4d298a9a1f637ee4c564e5a93afd4258a0e226af6fb27e85fbe4f396277fae5b",
           "sizeBytes": 49302
+        }
+      ]
+    },
+    {
+      "id": "discord",
+      "version": "0.5.1",
+      "name": "Discord 文字聊天",
+      "author": "Tawake1",
+      "description": "让鲸鲸在 Discord 私信、频道和讨论串中聊天，支持引用回复、绑定网页会话、频道暂停和可选图片识别。",
+      "repository": "https://github.com/Tawake1/whalelife-plugin-discord",
+      "installation": "https://github.com/Tawake1/whalelife-plugin-discord/blob/db5c118c219fbd56ed8953b102ecbabaf634294a/README.md#安装",
+      "feedback": "https://github.com/Tawake1/whalelife-plugin-discord/issues",
+      "dependencies": [],
+      "collected": "2026-11-23",
+      "stars": 0,
+      "verifiedReleases": [
+        {
+          "version": "0.5.1",
+          "hostRange": ">=0.1.1 <=0.1.2",
+          "platform": "win32",
+          "arch": "x64",
+          "dependencies": {},
+          "assetUrl": "https://github.com/Tawake1/whalelife-plugin-discord/releases/download/v0.5.1/discord-0.5.1.wlpkg.gz",
+          "sizeBytes": 3351727,
+          "sha256": "dba33462bc634eb12f28046d3d557597af90ba12507d47adce1b44596dee825e"
         }
       ]
     }
