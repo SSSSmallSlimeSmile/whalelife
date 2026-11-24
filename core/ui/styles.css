@@ -2356,16 +2356,16 @@ dialog::backdrop {
   flex: 1;
   min-width: 0;
 }
-.chat-ruler {
+.chat-rail {
   position: relative;
   flex: 0 0 18px;
   width: 18px;
   margin: 22px 0 22px 6px;
 }
-.chat-ruler[hidden] {
+.chat-rail[hidden] {
   display: none;
 }
-.chat-ruler::before {
+.chat-rail::before {
   content: "";
   position: absolute;
   left: 8px;
@@ -2374,41 +2374,69 @@ dialog::backdrop {
   width: 1px;
   background: var(--line);
 }
-.chat-ruler .tick {
+.chat-rail .chat-rail-tick {
   position: absolute;
   left: 0;
   width: 18px;
-  height: 6px;
+  height: 10px;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: pointer;
 }
-.chat-ruler .tick::after {
-  content: "";
+.chat-rail .chat-rail-tick i {
   display: block;
   width: 9px;
   height: 2px;
-  margin: 2px auto;
+  margin: 4px auto;
   border-radius: 2px;
   background: #cfccdb;
   transition: width 0.15s ease, background 0.15s ease;
 }
-.chat-ruler .tick:hover::after {
+.chat-rail .chat-rail-tick:hover i {
   width: 13px;
   background: var(--muted);
 }
-.chat-ruler .tick.active::after {
+.chat-rail .chat-rail-tick.active i {
   width: 14px;
   background: var(--accent);
 }
-.chat-ruler .tick:focus-visible {
+.chat-rail .chat-rail-tick:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
   border-radius: 4px;
 }
+.chat-rail-card {
+  position: fixed;
+  z-index: 60;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 30px rgba(20, 22, 30, 0.12);
+  font-size: 12px;
+  line-height: 1.6;
+  color: #2c2f33;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-rail-card[hidden] {
+  display: none;
+}
+.chat-rail-card b {
+  font-size: 12.5px;
+}
+.chat-rail-card span {
+  color: #6b7280;
+}
+.chat-rail-card .chat-rail-card-meta {
+  color: var(--accent);
+  font-size: 11px;
+}
 @media (max-width: 640px) {
-  .chat-ruler {
+  .chat-rail {
     display: none;
   }
 }

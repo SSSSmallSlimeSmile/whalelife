@@ -554,7 +554,167 @@ class ConsoleApp {
     if (!node) return;
     const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top;
     this.setScrollTop(box, box.scrollTop + top + (Number(saved.offset) || 0));
-    this.updateRuler();
+    this.syncRail();
+  }
+/** 左侧段落目录：满 20 条或隔 30 分钟切一段，点一下跳到那段。 */
+  /** 左侧导航轨：一条用户请求一节。轨道上只画刻度，摘要放进悬浮卡（勘 2026-11-16）。 */
+  renderOutline() {
+    const rail = $("chat-rail");
+    if (!rail) return;
+    this.railTurns = [];
+    let turn = null;
+    (this.state.messages || []).forEach((m, index) => {
+      if (m.role === "user") {
+        turn = { from: index, ask: plainText(m.text), answers: [] };
+        this.railTurns.push(turn);
+        return;
+      }
+      if (turn && m.text) turn.answers.push(plainText(m.text));
+    });
+    if (this.railTurns.length < 3) {
+      rail.hidden = true;
+      rail.innerHTML = "";
+      this.hideRailCard();
+      return;
+    }
+    rail.hidden = false;
+    rail.innerHTML =
+      this.railTurns
+        .map(
+          (t, i) =>
+            '<button type="button" class="chat-rail-tick" data-turn="' + i +
+            '" aria-label="' + e(clip(t.ask, 40)) + '"><i></i></button>',
+        )
+        .join("");
+    rail.querySelectorAll("[data-turn]").forEach((tick) => {
+      tick.onmouseenter = () => this.showRailCard(tick);
+      tick.onmouseleave = () => this.hideRailCard();
+      tick.onfocus = () => this.showRailCard(tick);
+      tick.onblur = () => this.hideRailCard();
+      tick.onclick = () => this.jumpToTurn(Number(tick.dataset.turn));
+    });
+    this.watchRail();
+  }
+  railCard() {
+    let card = document.getElementById("chat-rail-card");
+    if (!card) {
+      card = document.createElement("div");
+      card.id = "chat-rail-card";
+      card.className = "chat-rail-card";
+      card.hidden = true;
+      document.body.appendChild(card);
+    }
+    return card;
+  }
+  /** 悬浮卡贴在刻度右边，纵向不许出窗口。 */
+  showRailCard(tick) {
+    const turn = (this.railTurns || [])[Number(tick.dataset.turn)];
+    if (!turn) return;
+    const card = this.railCard();
+    const answer = turn.answers.join(" ");
+    card.innerHTML =
+      "<b>" + e(clip(turn.ask, 120)) + "</b>" +
+      "<span>" + e(clip(answer || "（这一节没有回答）", 260)) + "</span>" +
+      '<span class="chat-rail-card-meta">' + (1 + turn.answers.length) + " 条</span>";
+    card.hidden = false;
+    const rect = tick.getBoundingClientRect();
+    const box = card.getBoundingClientRect();
+    const left = Math.min(rect.right + 12, window.innerWidth - box.width - 12);
+    const top = Math.max(12, Math.min(rect.top - 8, window.innerHeight - box.height - 12));
+    card.style.left = Math.max(12, left) + "px";
+    card.style.top = top + "px";
+  }
+  hideRailCard() {
+    const card = document.getElementById("chat-rail-card");
+    if (card) card.hidden = true;
+  }
+  jumpToTurn(index) {
+    const turn = (this.railTurns || [])[index];
+    if (!turn) return;
+    const nodes = $("messages")?.querySelectorAll(".message") || [];
+    const target = $("messages")?.querySelector('.message[data-index="' + turn.from + '"]');
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+  /** 滚动或窗口尺寸一变就重排：刻度按消息的真实位置摆，紫色只留一个（勘 2026-11-16）。
+      旧版一边画按比例插值的游标、一边画按消息判定的高亮，两者位置不一致，
+      看着就是"对不上"；窗口一改尺寸还会同时看到两条紫线。现在只保留刻度本身。 */
+  watchRail() {
+    const rail = $("chat-rail");
+    const box = $("messages");
+    if (!rail || !box) return;
+    // 每次 render() 都会用整页 markup 重建 #messages，拿到的是新节点；
+    // 旧监听还挂在被摘下来的那个节点上，此后滚动手势再也送不到轨道，
+    // 高亮就永远停在最后一次算出来的位置（勘 2026-11-16 修）。
+    if (this.railBox !== box) {
+      if (this.railBox && this.railScrollHandler)
+        this.railBox.removeEventListener("scroll", this.railScrollHandler);
+      this.railScrollHandler = () => this.syncRail();
+      box.addEventListener("scroll", this.railScrollHandler, { passive: true });
+      this.railBox = box;
+    }
+    if (!this.railWatched) {
+      this.railWatched = true;
+      window.addEventListener("resize", () => this.syncRail(), { passive: true });
+      // 切窗口回来时，尺寸没变、滚动没变，一个事件都不会来。
+      // 上一轮若是趁容器被隐藏时算过一遍，高亮就钉死了，得给个重新对账的机会（勘 2026-11-16 修）。
+      window.addEventListener("focus", () => this.syncRail());
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) this.syncRail();
+      });
+    }
+    // ResizeObserver 每次都要盯住"当前的"内容节点。
+    // 旧写法只在第一次 observe：一旦 #messages 的内层被整体换掉，
+    // 观察者盯的就是已经摘下来的节点，此后永不触发（勘 2026-11-16 修）。
+    if (typeof ResizeObserver === "function") {
+      const target = box.firstElementChild || box;
+      if (this.railObserverTarget !== target) {
+        if (!this.railObserver) this.railObserver = new ResizeObserver(() => this.syncRail());
+        this.railObserver.disconnect();
+        this.railObserver.observe(target);
+        this.railObserverTarget = target;
+      }
+    }
+    this.syncRail();
+  }
+  syncRail() {
+    const rail = $("chat-rail");
+    const box = $("messages");
+    if (!rail || !box || rail.hidden) return;
+    // 窗口最小化、切到后台、渲染中途容器被隐藏时，所有 rect 都是 0。
+    // 那时"每条消息都顶在阈值上方"会把高亮钉死在最后一格，
+    // 而尺寸恢复后往往又没有事件再来纠正——干脆不在这时候算（勘 2026-11-16 修）。
+    if (document.hidden || box.clientHeight < 1 || rail.clientHeight < 1) return;
+    const ticks = [...rail.querySelectorAll(".chat-rail-tick")];
+    if (!ticks.length) return;
+    const nodes = [...box.querySelectorAll(".message")];
+    const boxRect = box.getBoundingClientRect();
+    const pad = 12;
+    const usable = Math.max(1, rail.clientHeight - pad * 2);
+    // 刻度等距排开，看着整齐；位置只表示"第几节"，不再对应真实滚动偏移（勘 2026-11-16）
+    const count = ticks.length;
+    const stepRaw = count > 1 ? usable / (count - 1) : 0;
+    const step = Math.max(6, stepRaw);
+    const total = step * Math.max(0, count - 1);
+    const start = pad + (step > stepRaw ? Math.max(0, (usable - total) / 2) : 0);
+    ticks.forEach((tick, i) => {
+      tick.style.top = Math.round((start + i * step) * 10) / 10 + "px";
+    });
+    // 当前那一节：直接拿消息相对视口的位置比，不再掺 scrollTop。
+    // 旧写法假设滚动一定发生在这个容器上；实际一旦滚动落在祖先元素，
+    // scrollTop 恒为 0、每条消息的 rect 却已经在动，于是"全都不超过阈值"，
+    // 高亮永远停在最后一格（勘 2026-11-16 修）。
+    const liveBox = box.getBoundingClientRect();
+    const head = liveBox.top + Math.min(120, box.clientHeight * 0.3);
+    let active = -1;
+    (this.railTurns || []).forEach((turn, i) => {
+      const node = box.querySelector('.message[data-index="' + turn.from + '"]');
+      if (!node || !node.isConnected) return;
+      const rect = node.getBoundingClientRect();
+      if (!rect.height && !rect.width) return; // 还没量出来的节点不算
+      if (rect.top <= head) active = i;
+    });
+    if (active < 0) return; // 一个都量不准，就别动上一轮的结果
+    ticks.forEach((tick, i) => tick.classList.toggle("active", i === active));
   }
   async refreshSessionContext() {
     const id = this.state.session;
@@ -1030,6 +1190,7 @@ class ConsoleApp {
     if (!this.state.messages.length) {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
       this.ensureChatScroll();
+      this.renderOutline();
       return;
     }
     // 整页重画会换掉 #messages，状态必须存在实例上，不能只读当前这个盒子
@@ -1052,6 +1213,7 @@ class ConsoleApp {
     const stick = opts.anchor === "keep" ? false : pinBottom || prevNearBottom;
     this.setScrollTop(box, stick ? box.scrollHeight : prevTop);
     this.ensureChatScroll();
+    this.renderOutline();
     if (this.pendingRestore) this.restoreChatView(box);
     this.renderUnsentNudges();
   }
@@ -1075,21 +1237,10 @@ class ConsoleApp {
     box.scrollTop = top;
     if (style) style.scrollBehavior = previous;
   }
-  /** 刻度轨与滚动监听只绑一次；页面重绘后元素换了也能重新绑上。 */
+  /** 消息区的滚动、翻页、位置保存只绑一次。刻度轨由 renderOutline 负责。 */
   ensureChatScroll() {
     const box = $("messages");
-    const rail = $("chat-ruler");
     if (!box) return;
-    if (rail && rail.dataset && rail.dataset.bound !== "1") {
-      rail.dataset.bound = "1";
-      rail.addEventListener("click", (event) => {
-        const tick = event.target.closest("[data-tick]");
-        const target = $("messages");
-        if (!tick || !target || !this.rulerStep) return;
-        const index = Number(tick.dataset.tick) || 0;
-        this.setScrollTop(target, index * this.rulerStep, "smooth");
-      });
-    }
     if (box.dataset && box.dataset.scrollBound !== "1") {
       box.dataset.scrollBound = "1";
       // 只有真的动手滚过，才允许触顶自动翻页；否则初次加载就会一直往前翻。
@@ -1103,7 +1254,7 @@ class ConsoleApp {
         "scroll",
         () => {
           if (box !== $("messages")) return;
-          this.updateRuler();
+          this.syncRail();
           // 位置攒一下再写，滚动一次不要连着写几十遍 localStorage
           if (this.viewTimer) clearTimeout(this.viewTimer);
           this.viewTimer = setTimeout(() => this.saveChatView(), 400);
@@ -1113,77 +1264,7 @@ class ConsoleApp {
         { passive: true },
       );
     }
-    // 排版早晚会变（换页、窗口缩放、刷新后第一次排版），插个观察者补一次刻度。
-    if (box.dataset && box.dataset.resizerBound !== "1" && typeof ResizeObserver === "function") {
-      box.dataset.resizerBound = "1";
-      this.rulerObserver?.disconnect?.();
-      this.rulerObserver = new ResizeObserver(() => this.updateRuler());
-      this.rulerObserver.observe(box);
-    }
-    this.updateRuler();
-  }
-  updateRuler() {
-    const rail = $("chat-ruler");
-    const box = $("messages");
-    if (!rail || !box) return;
-    // 轨和消息区必须是两个元素；万一同一个，宁可把轨关掉，也不能擦掉正文。
-    if (rail === box) {
-      rail.hidden = true;
-      this.rulerStep = 0;
-      this.rulerCount = 0;
-      return;
-    }
-    if (!rail.dataset) return;
-    // 量不到高度（藏着的页签、刚换过的元素）就先不动：
-    // 以前这里把 innerHTML 清空，刷新后刻度轨就整条空着，滚动也恢复不回来。
-    const viewport = box.clientHeight || 0;
-    // 刚刷新时消息区还没排版，量到的是 0：过一帧重量，别把轨留成空的。
-    if (!viewport) {
-      if (!this.rulerRetry) {
-        this.rulerRetry = setTimeout(() => {
-          this.rulerRetry = 0;
-          this.updateRuler();
-        }, 60);
-      }
-      return;
-    }
-    const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
-    const scrollable = box.scrollHeight - box.clientHeight;
-    const count =
-      scrollable < step * 0.6
-        ? 0
-        : Math.min(Math.ceil((scrollable + box.clientHeight) / step), 60);
-    if (!count) {
-      rail.hidden = true;
-      rail.innerHTML = "";
-      this.rulerStep = 0;
-      this.rulerCount = 0;
-      return;
-    }
-    // 换了新的轨元素（换会话、刷新后重排版），哪怕尺寸和上次一模一样，
-    // 新元素里也是空的：只比尺寸会整条空着。所以元素变了就必须重画。
-    if (this.rulerRail !== rail || this.rulerStep !== step || this.rulerCount !== count) {
-      this.rulerRail = rail;
-      this.rulerStep = step;
-      this.rulerCount = count;
-      const height = Math.max(box.clientHeight - 12, count * 6);
-      const parts = [];
-      for (let index = 0; index < count; index += 1) {
-        const ratio = count === 1 ? 0 : index / (count - 1);
-        parts.push(
-          `<button type="button" class="tick" data-tick="${index}" style="top:${(ratio * (height - 6)).toFixed(1)}px" aria-label="第 ${index + 1} 屏，共 ${count} 屏"></button>`,
-        );
-      }
-      rail.innerHTML = parts.join("");
-    }
-    rail.hidden = false;
-    const active = Math.max(
-      0,
-      Math.min(count - 1, Math.round(box.scrollTop / step)),
-    );
-    rail
-      .querySelectorAll(".tick")
-      .forEach((tick, index) => tick.classList.toggle("active", index === active));
+    this.syncRail();
   }
   /** 滚到顶部时往前翻一页，翻完把阅读位置原样托住。 */
   async loadOlder() {
@@ -1230,7 +1311,7 @@ class ConsoleApp {
     bubble.innerHTML = renderRich(this.reply.text);
     box.querySelector('.message[data-thinking="1"]')?.remove();
     if (nearBottom) box.scrollTop = box.scrollHeight;
-    this.updateRuler();
+    this.syncRail();
   }
   /** 被拒且没处放的补充排在这里：能重发，也能显式丢掉。不碰输入框里正在写的草稿。 */
   renderUnsentNudges() {
