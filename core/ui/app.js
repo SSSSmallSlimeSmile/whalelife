@@ -558,6 +558,15 @@ class ConsoleApp {
   }
 /** 左侧段落目录：满 20 条或隔 30 分钟切一段，点一下跳到那段。 */
   /** 左侧导航轨：一条用户请求一节。轨道上只画刻度，摘要放进悬浮卡（勘 2026-11-16）。 */
+  /** 一批显示多少格：按轨道高度算，扣掉首尾两个翻页格（勘 2026-11-25）。 */
+  railBatchSize() {
+    const rail = $("chat-rail");
+    const h = rail && rail.clientHeight ? rail.clientHeight : 0;
+    if (h < 80) return 48;
+    return Math.max(8, Math.floor((h - 24) / 10) - 2);
+  }
+  /** 左侧导航轨：一条用户请求一节。轨道上只画刻度，摘要放进悬浮卡（勘 2026-11-16）。
+      节数多过一批时，首尾各压成一格翻页入口，中间 n 格是本批；不翻页时末尾停在最新一节（勘 2026-11-25）。 */
   renderOutline() {
     const rail = $("chat-rail");
     if (!rail) return;
@@ -574,26 +583,64 @@ class ConsoleApp {
     if (this.railTurns.length < 3) {
       rail.hidden = true;
       rail.innerHTML = "";
+      this.railStart = null;
+      this.railPinned = false;
       this.hideRailCard();
       return;
     }
     rail.hidden = false;
-    rail.innerHTML =
-      this.railTurns
-        .map(
-          (t, i) =>
-            '<button type="button" class="chat-rail-tick" data-turn="' + i +
-            '" aria-label="' + e(clip(t.ask, 40)) + '"><i></i></button>',
-        )
-        .join("");
-    rail.querySelectorAll("[data-turn]").forEach((tick) => {
+    const total = this.railTurns.length;
+    const size = this.railBatchSize();
+    this.railBatch = size;
+    let start = this.railPinned && Number.isFinite(this.railStart) ? Math.round(this.railStart) : total - size;
+    start = Math.max(0, Math.min(start, Math.max(0, total - 1)));
+    if (start + size > total) start = Math.max(0, total - size);
+    this.railStart = start;
+    const end = Math.min(total, start + size);
+    let html = "";
+    if (start > 0) {
+      html +=
+        '<button type="button" class="chat-rail-tick chat-rail-page" data-page="prev" aria-label="更早的 ' +
+        start + ' 轮"><i></i></button>';
+    }
+    for (let i = start; i < end; i += 1) {
+      const t = this.railTurns[i];
+      html +=
+        '<button type="button" class="chat-rail-tick" data-turn="' + i +
+        '" aria-label="' + e(clip(t.ask, 40)) + '"><i></i></button>';
+    }
+    if (end < total) {
+      html +=
+        '<button type="button" class="chat-rail-tick chat-rail-page" data-page="next" aria-label="后面还有 ' +
+        (total - end) + ' 轮"><i></i></button>';
+    }
+    rail.innerHTML = html;
+    rail.querySelectorAll("[data-turn],[data-page]").forEach((tick) => {
       tick.onmouseenter = () => this.showRailCard(tick);
       tick.onmouseleave = () => this.hideRailCard();
       tick.onfocus = () => this.showRailCard(tick);
       tick.onblur = () => this.hideRailCard();
-      tick.onclick = () => this.jumpToTurn(Number(tick.dataset.turn));
+      tick.onclick = () => {
+        if (tick.dataset.page) this.railPage(tick.dataset.page);
+        else this.jumpToTurn(Number(tick.dataset.turn));
+      };
     });
+    this.railFromRender = true;
     this.watchRail();
+    this.railFromRender = false;
+  }
+  /** 翻页：只换这一批刻度，不动消息区（勘 2026-11-25）。 */
+  railPage(dir) {
+    const total = (this.railTurns || []).length;
+    if (!total) return;
+    const size = this.railBatch || 48;
+    const step = Math.max(1, size - 4);
+    const from = Number.isFinite(this.railStart) ? this.railStart : Math.max(0, total - size);
+    const start = dir === "prev" ? from - step : from + step;
+    this.railStart = Math.max(0, Math.min(start, Math.max(0, total - size)));
+    this.railPinned = this.railStart + size < total;
+    this.hideRailCard();
+    this.renderOutline();
   }
   railCard() {
     let card = document.getElementById("chat-rail-card");
@@ -607,15 +654,34 @@ class ConsoleApp {
     return card;
   }
   /** 悬浮卡贴在刻度右边，纵向不许出窗口。 */
+  /** 悬浮卡贴在刻度右边，纵向不许出窗口。翻页格显示的是这一批的轮次区间（勘 2026-11-25）。 */
   showRailCard(tick) {
-    const turn = (this.railTurns || [])[Number(tick.dataset.turn)];
-    if (!turn) return;
     const card = this.railCard();
-    const answer = turn.answers.join(" ");
+    const total = (this.railTurns || []).length;
+    const size = this.railBatch || 48;
+    const start = Number.isFinite(this.railStart) ? this.railStart : 0;
+    let head = "";
+    let body = "";
+    let meta = "";
+    if (tick.dataset.page) {
+      const step = Math.max(1, size - 4);
+      const lo = tick.dataset.page === "prev" ? Math.max(0, start - step) : start + size;
+      const hi = Math.min(total, lo + step);
+      head = tick.dataset.page === "prev" ? "更早的一批" : "后面的一批";
+      body = "第 " + (lo + 1) + "–" + hi + " 轮";
+      meta = "共 " + total + " 轮 · 点一下换这一批";
+    } else {
+      const turn = (this.railTurns || [])[Number(tick.dataset.turn)];
+      if (!turn) return;
+      head = clip(turn.ask, 120);
+      const answer = turn.answers.join(" ");
+      body = clip(answer || "（这一节没有回答）", 260);
+      meta = 1 + turn.answers.length + " 条";
+    }
     card.innerHTML =
-      "<b>" + e(clip(turn.ask, 120)) + "</b>" +
-      "<span>" + e(clip(answer || "（这一节没有回答）", 260)) + "</span>" +
-      '<span class="chat-rail-card-meta">' + (1 + turn.answers.length) + " 条</span>";
+      "<b>" + e(head) + "</b>" +
+      "<span>" + e(body) + "</span>" +
+      '<span class="chat-rail-card-meta">' + e(meta) + "</span>";
     card.hidden = false;
     const rect = tick.getBoundingClientRect();
     const box = card.getBoundingClientRect();
@@ -680,17 +746,18 @@ class ConsoleApp {
     const rail = $("chat-rail");
     const box = $("messages");
     if (!rail || !box || rail.hidden) return;
-    // 窗口最小化、切到后台、渲染中途容器被隐藏时，所有 rect 都是 0。
-    // 那时"每条消息都顶在阈值上方"会把高亮钉死在最后一格，
-    // 而尺寸恢复后往往又没有事件再来纠正——干脆不在这时候算（勘 2026-11-16 修）。
     if (document.hidden || box.clientHeight < 1 || rail.clientHeight < 1) return;
-    const ticks = [...rail.querySelectorAll(".chat-rail-tick")];
+    const turns = this.railTurns || [];
+    // 窗口尺寸一变，一批能放几格也跟着变；差到两格以上就按新的一批重画（勘 2026-11-25）。
+    if (Math.abs(this.railBatchSize() - (this.railBatch || 0)) >= 2) {
+      this.renderOutline();
+      return;
+    }
+    const ticks = [...rail.querySelectorAll(".chat-rail-tick[data-turn]")];
     if (!ticks.length) return;
-    const nodes = [...box.querySelectorAll(".message")];
     const boxRect = box.getBoundingClientRect();
     const pad = 12;
     const usable = Math.max(1, rail.clientHeight - pad * 2);
-    // 刻度等距排开，看着整齐；位置只表示"第几节"，不再对应真实滚动偏移（勘 2026-11-16）
     const count = ticks.length;
     const stepRaw = count > 1 ? usable / (count - 1) : 0;
     const step = Math.max(6, stepRaw);
@@ -699,22 +766,35 @@ class ConsoleApp {
     ticks.forEach((tick, i) => {
       tick.style.top = Math.round((start + i * step) * 10) / 10 + "px";
     });
-    // 当前那一节：直接拿消息相对视口的位置比，不再掺 scrollTop。
-    // 旧写法假设滚动一定发生在这个容器上；实际一旦滚动落在祖先元素，
-    // scrollTop 恒为 0、每条消息的 rect 却已经在动，于是"全都不超过阈值"，
-    // 高亮永远停在最后一格（勘 2026-11-16 修）。
     const liveBox = box.getBoundingClientRect();
     const head = liveBox.top + Math.min(120, box.clientHeight * 0.3);
     let active = -1;
-    (this.railTurns || []).forEach((turn, i) => {
+    turns.forEach((turn, i) => {
       const node = box.querySelector('.message[data-index="' + turn.from + '"]');
       if (!node || !node.isConnected) return;
       const rect = node.getBoundingClientRect();
-      if (!rect.height && !rect.width) return; // 还没量出来的节点不算
+      if (!rect.height && !rect.width) return;
       if (rect.top <= head) active = i;
     });
-    if (active < 0) return; // 一个都量不准，就别动上一轮的结果
-    ticks.forEach((tick, i) => tick.classList.toggle("active", i === active));
+    if (active < 0) return;
+    const first = Number(ticks[0].dataset.turn);
+    const last = Number(ticks[count - 1].dataset.turn);
+    if (active < first || active > last) {
+      // 手动翻到别的批次时，高亮在批外是正常的：别把批次拽回去，
+      // 等用户点「更新」那一格，或者自己滚回这一批里（勘 2026-11-25）。
+      // 只有真正由滚动引起的越界才把批次拽回来；刚翻完页那一下不算（勘 2026-11-25）。
+      if (this.railPinned && this.railFromRender) {
+        ticks.forEach((tick) => tick.classList.remove("active"));
+        return;
+      }
+      this.railPinned = false;
+      const size = this.railBatch || 48;
+      const lo = Math.max(0, active - 2);
+      this.railStart = Math.max(0, Math.min(lo, Math.max(0, turns.length - size)));
+      this.renderOutline();
+      return;
+    }
+    ticks.forEach((tick) => tick.classList.toggle("active", Number(tick.dataset.turn) === active));
   }
   async refreshSessionContext() {
     const id = this.state.session;

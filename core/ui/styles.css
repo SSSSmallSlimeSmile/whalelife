@@ -2365,15 +2365,6 @@ dialog::backdrop {
 .chat-rail[hidden] {
   display: none;
 }
-.chat-rail::before {
-  content: "";
-  position: absolute;
-  left: 8px;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--line);
-}
 .chat-rail .chat-rail-tick {
   position: absolute;
   left: 0;
@@ -2405,6 +2396,18 @@ dialog::backdrop {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
   border-radius: 4px;
+}
+/* 首尾的翻页格：比普通刻度更细更浅，点一下换一批（勘 2026-11-25） */
+.chat-rail .chat-rail-tick.chat-rail-page i {
+  width: 6px;
+  height: 1px;
+  margin: 4.5px auto;
+  background: var(--muted);
+  opacity: 0.45;
+}
+.chat-rail .chat-rail-tick.chat-rail-page:hover i {
+  width: 14px;
+  opacity: 1;
 }
 .chat-rail-card {
   position: fixed;
