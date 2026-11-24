@@ -4,10 +4,13 @@
  */
 import { persona, personaIdentity } from "./persona.ts";
 import { conversationRows } from "./channel-history.ts";
+import { channelFailureReason } from "./channel-errors.ts";
 import { thinkingToolHistory } from "./llm.ts";
 import { EmptyModelResponseError } from "./model-response-error.ts";
 import { requestsProtocolExample, ToolProtocolStream } from "./tool-protocol-stream.ts";
 import { promptText, toolContentMessage, TOOL_CONTENT_LIMITS } from "./tool-content.ts";
+import { channelImageParts, containsAttachedImageBytes, isUnsupportedChannelImage, safeChannelDescription, withPrivateChannelImages } from "./channel-images.ts";
+import type { ChannelImage, ChatMessage } from "./plugin-api.ts";
 import { timezone, timeContext, timeLabel, messageTime, summaryTime, TIME_GUIDANCE } from "./time.ts";
 import { safeId } from "./memory.ts";
 import { createHash, randomUUID } from "node:crypto";
@@ -306,6 +309,7 @@ export class Sessions {
     if (meta?.deleted) throw Error("此会话已删除，请新建或选择其他会话");
     if (this.memoryMaintenance || this.blockedSessions.has(id))
       throw Error("会话维护中，请稍后重试");
+    if (route?.images?.length && !text.trim()) text = `[图片 ${route.images.length} 张]`;
     if (!text.trim() || text.length > 16000) throw Error("请输入 1–16000 字");
     const receivedAt = route?.receivedAt ?? new Date().toISOString(), zone = route?.timezone ?? timezone(this.config.timezone);
     const { memory, memoryEngine: engine, llm, tools, logger } = this.services;
@@ -315,6 +319,34 @@ export class Sessions {
     });
     turn.execution = execution;
     const diagnostics = this.services.diagnostics;
+    // Only model-facing message objects receive image parts or an auxiliary description.
+    const channelPictures: { message: ChatMessage; caption: string; id: string; images: ChannelImage[] }[] = [];
+    const attachPictures = (message: ChatMessage, id: string, images?: ChannelImage[]) => {
+      if (!images?.length) return;
+      const caption = message.content as string;
+      channelPictures.push({ message, caption, id, images });
+      message.content = [{ type: "text", text: caption }, ...channelImageParts(images)];
+    };
+    const echoesPictures = (text: string) => channelPictures.some(row => containsAttachedImageBytes(text, row.images));
+    let describePictures = false;
+    let described = 0;
+    const prepareDescriptions = async (activeSignal: AbortSignal) => {
+      while (describePictures && described < channelPictures.length) {
+        activeSignal.throwIfAborted();
+        const row = channelPictures[described];
+        let description: string;
+        try {
+          const value = await route!.describeImages!(row.id, row.images, activeSignal);
+          description = safeChannelDescription(value, channelPictures.flatMap(item => item.images));
+        } catch {
+          activeSignal.throwIfAborted();
+          throw Error("渠道辅助识图失败，未生成本轮回复");
+        }
+        activeSignal.throwIfAborted();
+        row.message.content = row.caption + "\n【渠道辅助识图，以下为图片内容描述】\n" + description;
+        described++;
+      }
+    };
     const observed = async () => {
     diagnostics?.event("execution.start", { title: transient ? "technical_task" : "conversation",
       trigger: transient ? "program" : "conversation_input", origin: route?.origin ?? { channel: "web" } });
@@ -546,6 +578,7 @@ export class Sessions {
         throw Error((memoryNotice ? memoryNotice + " " : "") + "当前上下文已达到模型容量，原文已保留。请在使用配置中选择新会话、调整模型容量或启用日记压缩；不会自动删减历史或切换会话。");
       const frame = assemble();
       const messages: any[] = frame.messages;
+      if (route?.messageId) attachPictures(messages[messages.length - 1], route.messageId, route.images);
       if (diagnostics?.enabled) diagnostics.event("context.change", { operation: "assemble", source: "session",
         description: "人格、事实、有效日记、召回与历史经当前策略组装；实际发送内容以 request.start.body 为准",
         after: { materials: materials(), history: recent, input: text, transient,
@@ -556,6 +589,7 @@ export class Sessions {
       const offeredNames = new Set<string>(toolList.map((item: any) => item.function.name));
       let measured: any = null;
       let memoryWriteRejected = false;
+      const executedToolIds = new Set<string>();
       const mediaSignals: AbortSignal[] = [];
       let mediaImages = 0, mediaBytes = 0;
       const memoryRevision = engine
@@ -565,7 +599,8 @@ export class Sessions {
       const inputRow = (message: TurnMessage) => ({ type: "message", ...source, ...context,
         origin: { ...source.origin, action: "接收消息" }, session: id, role: "user",
         ...(message.senderProfile ? { senderProfile: message.senderProfile } : {}),
-        text: message.text, external_message_id: message.messageId,
+        text: message.images?.length && !message.text.trim() ? `[图片 ${message.images.length} 张]` : message.text,
+        external_message_id: message.messageId,
         ts: message.receivedAt, timezone: message.timezone });
       // 补充在接收时就落盘：模型报错或取消也不能把它弄丢。
       input?.setPersister(async (message) => { await memory.appendEvent(inputRow(message)); });
@@ -577,9 +612,11 @@ export class Sessions {
           const row = inputRow(message);
           // 接收时就落过盘的，这里不再写一遍；排队中的轮次还没挂 persister，由这里补
           if (!input.persisted(message.messageId)) await memory.appendEvent(row);
-          messages.push({ role: "user", content: "【本轮用户补充；消息时间 " + messageTime(row, zone) +
-            "；来源 " + JSON.stringify(source.origin) + "】\n" + speakerText(speakerOf(row), message.text) });
-          diagnostics?.event("context.change", { operation: "append", source: "user_input", after: messages.at(-1) });
+          const addition: ChatMessage = { role: "user", content: "【本轮用户补充；消息时间 " + messageTime(row, zone) +
+            "；来源 " + JSON.stringify(source.origin) + "】\n" + speakerText(speakerOf(row), row.text) };
+          diagnostics?.event("context.change", { operation: "append", source: "user_input", after: { ...addition } });
+          attachPictures(addition, message.messageId, message.images);
+          messages.push(addition);
           await execution?.write("input_appended", { message_id: message.messageId,
             received_at: message.receivedAt, timezone: message.timezone });
         }
@@ -592,6 +629,7 @@ export class Sessions {
         signal.throwIfAborted();
         const requestSignal = mediaSignals.length ? AbortSignal.any([signal, ...mediaSignals]) : signal;
         requestSignal.throwIfAborted();
+        if (describePictures) await prepareDescriptions(requestSignal);
         let requestTime = timing();
         frame.refreshTime(requestTime);
         if (
@@ -607,7 +645,10 @@ export class Sessions {
         await execution?.write("model_start", { round: turn.round });
         // Archival writes can yield to incoming messages; include those before this request.
         if (input?.hasPending()) {
-          do { await consumeInput(); } while (input.hasPending());
+          do {
+            await consumeInput();
+            if (describePictures) await prepareDescriptions(requestSignal);
+          } while (input.hasPending());
           requestSignal.throwIfAborted();
           requestTime = timing();
           frame.refreshTime(requestTime);
@@ -622,11 +663,33 @@ export class Sessions {
         try {
           reply = await llm.chat({
             provider: p.provider, messages, tools: activeTools,
-            onChunk: stream?.push ?? onChunk, signal: requestSignal,
+            onChunk: channelPictures.length ? undefined : stream?.push ?? onChunk, signal: requestSignal,
+            ...(channelPictures.length && { privateChannelImages: true }),
           }, this.services.toolOrder);
         } catch (error) {
+          requestSignal.throwIfAborted();
+          // Retry only this rejected model request. Earlier tool calls and their results stay in the frame.
+          if (!describePictures && channelPictures.length && !mediaImages && route?.describeImages && isUnsupportedChannelImage(error)) {
+            describePictures = true;
+            await execution?.write("channel_image_fallback", { round: turn.round, messages: channelPictures.length });
+            continue;
+          }
           if (!requestSignal.aborted) stream?.interrupted();
+          if (channelPictures.length && echoesPictures(error instanceof Error ? error.message : String(error)))
+            throw Error("模型返回了原始图片数据，已停止本轮");
           throw error;
+        }
+        if (channelPictures.length) {
+          if (echoesPictures(JSON.stringify(reply))) throw Error("模型返回了原始图片数据，已停止本轮");
+          if (describePictures && reply.toolCalls.length) {
+            const batch = new Set<string>();
+            for (const call of reply.toolCalls) {
+              if (executedToolIds.has(call.id) || batch.has(call.id))
+                throw Error("模型重复返回已处理的工具调用 ID，本轮已停止；请核对先前的工具回执");
+              batch.add(call.id);
+            }
+          }
+          if (reply.text) (stream?.push ?? onChunk)(reply.text);
         }
         // Structured calls are authoritative, even when the provider also
         // supplied literal markup in content. Never construct calls from text.
@@ -688,14 +751,18 @@ export class Sessions {
             await execution?.write("tool_skipped", { round: turn.round, tool_call_id: call.id,
               tool: turn.transient && !toolOrigin ? "[未注册工具]" : call.name, reason: "user_input_appended" });
           } else try {
-            result = await tools.call(
+            if (route?.describeImages) executedToolIds.add(call.id);
+            const runTool = () => tools.call(
               call.name,
               JSON.parse(call.arguments),
               mediaSignals.length ? { ...session, signal: toolSignal } : session,
               call.id,
               turn,
             );
+            result = await (channelPictures.length ? withPrivateChannelImages(runTool, channelPictures.flatMap(row => row.images)) : runTool());
           } catch (error: any) {
+            if (channelPictures.length && echoesPictures(String(error?.message ?? error)))
+              throw Error("工具返回了原始图片数据，已停止本轮");
             result = { ok: false, result: turn.transient ? "临时调用参数或执行失败；原始错误不保存" : error.message };
             diagnostics?.event("tool.end", { tool_call_id: call.id, name: call.name, arguments: call.arguments,
               status: "rejected", error });
@@ -705,6 +772,11 @@ export class Sessions {
           }
           if (!superseded && !result.ok && ["remember_fact", "edit_facts"].includes(call.name))
             memoryWriteRejected = true;
+          const media = tools.multimodal?.(result);
+          const storedResult = tools.stored?.(result) ?? (turn.transient ? { ok: result.ok, result: null, transient: true } : result);
+          if (channelPictures.length && (echoesPictures(JSON.stringify(storedResult)) ||
+            (!media && storedResult !== result && echoesPictures(JSON.stringify(result)))))
+            throw Error("工具返回了原始图片数据，已停止本轮");
           await memory.appendEvent({
             type: "tool",
             ...source,
@@ -712,10 +784,9 @@ export class Sessions {
             session: id,
             name: turn.transient && !toolOrigin ? "[未注册工具]" : call.name,
             ...(turn.transient ? {} : { args: call.arguments }),
-            ...(tools.stored?.(result) ?? (turn.transient ? { ok: result.ok, result: null, transient: true } : result)),
+            ...storedResult,
             ...context,
           });
-          const media = tools.multimodal?.(result);
           if (media) {
             mediaSignals.push(media.signal);
             // Preserve actual receipts above, but never continue with stopped/expired media.
@@ -735,7 +806,15 @@ export class Sessions {
           diagnostics?.event("context.change", { operation: "append", source: "tool_result", after: messages.at(-1) });
         }
         messages.push(...attachments);
-        if (attachments.length) diagnostics?.event("context.change", { operation: "append", source: "tool_attachments", after: attachments });
+        if (attachments.length && diagnostics?.enabled) {
+          // The diagnostic sink saves data URLs as files, including copies returned by ordinary tools.
+          const images = channelPictures.flatMap(row => row.images);
+          const after = images.length ? attachments.map(message => ({ ...message, content: message.content.map(part => {
+            const value = part.type === "image_url" ? part.image_url.url : part.text;
+            return containsAttachedImageBytes(value, images) ? { type: "text", text: "[渠道原图已省略]" } : part;
+          }) })) : attachments;
+          diagnostics.event("context.change", { operation: "append", source: "tool_attachments", after });
+        }
       }
       if (!final) throw new EmptyModelResponseError(undefined);
       await memory.appendEvent({
@@ -762,9 +841,11 @@ export class Sessions {
       executionStatus = "completed";
       return final;
     } catch (error: any) {
-      diagnostics?.event("execution.error", { error });
+      const reportedError = channelPictures.length || route?.images?.length
+        ? channelFailureReason(error, logger.secrets) : error;
+      diagnostics?.event("execution.error", { error: reportedError });
       await execution?.write("error", { round: turn.round,
-        error: turn.transient ? "含临时资料的执行失败，原始错误不落盘；请核对前序步骤和插件回执" : error });
+        error: turn.transient ? "含临时资料的执行失败，原始错误不落盘；请核对前序步骤和插件回执" : reportedError });
       throw error;
     } finally {
       this.identities.delete(id);

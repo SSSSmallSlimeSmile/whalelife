@@ -1,7 +1,23 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type RequestListener } from "node:http";
-import { withModelResponse, modelErrorMessage } from "../core/model-http.ts";
+import { withModelResponse, modelErrorMessage, upstreamModelError } from "../core/model-http.ts";
+import { isUnsupportedChannelImage } from "../core/channel-images.ts";
+
+test("only explicit image input incompatibility permits a channel fallback", () => {
+  for (const status of [400, 422, undefined]) {
+    assert.ok(isUnsupportedChannelImage(upstreamModelError(status, { error: { message: "This model does not support image inputs" } })));
+    assert.ok(isUnsupportedChannelImage(upstreamModelError(status, { error: { message: "Invalid content type. image_url is only supported by certain models." } })));
+    assert.ok(isUnsupportedChannelImage(upstreamModelError(status, { error: { code: "image_input_not_supported" } })));
+    for (const message of ["unsupported image format", "this model does not support images in this format",
+      "Image input is not supported for this API key", "request timeout", "invalid image", "unsupported image URL scheme"]) {
+      assert.equal(isUnsupportedChannelImage(upstreamModelError(status, { error: { message } })), false, message);
+    }
+  }
+  for (const status of [401, 403, 404, 408, 413, 429, 500, 503])
+    assert.equal(isUnsupportedChannelImage(upstreamModelError(status, { error: { code: "image_input_not_supported" } })), false);
+  assert.equal(isUnsupportedChannelImage(upstreamModelError(undefined, { error: { status: 429, message: "Image input is not supported" } })), false);
+});
 import { LLM } from "../core/llm.ts";
 
 async function server(t: TestContext, handler: RequestListener) {

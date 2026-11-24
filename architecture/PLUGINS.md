@@ -328,6 +328,8 @@ const text = await ctx.sessions.enqueueTransient({
 
 渠道 handle 提供可选能力标识 `supportsSenderProfile`。值为 `true` 时，`receive`、`openTurn`、`append` 接受 `senderProfile?: { nickname?: string; remark?: string }`，供模型区分同一会话里的不同发言人。账号归属、路由和权限继续使用原有认证与稳定 ID。逐条快照、旧宿主降级及调用示例见[入站发言人](CHANNELS.md#入站发言人)。
 
+渠道 handle 的 `supportsImageInput === true` 表示这三个入口都可以携带临时图片。主模型明确不支持图片输入时，主干才调用适配器可选的 `describeImages`，并在原轮使用描述继续回复。[入站临时图片与示例](CHANNELS.md#入站临时图片)
+
 ### 渠道轮内追加（2026-11-08兼容新增）
 
 渠道handle可选提供 `openTurn(message, {signal?}) -> Promise<ChannelTurn>`。插件先检测 `typeof channel.openTurn === "function"`；旧宿主降级为原 `receive` 逐条独立处理，或在必须依赖追加时提示能力缺失。普通 `receive`、`run/runTransient`、`enqueue/enqueueTransient` 保持原行为，不自动合并消息。

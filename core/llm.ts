@@ -9,7 +9,8 @@ import {
   modelConfigurationError,
   validateModelParameters,
 } from "./model-config.ts";
-import { withModelResponse, modelErrorMessage } from "./model-http.ts";
+import { withModelResponse, modelErrorMessage, upstreamModelError, channelUsage } from "./model-http.ts";
+import { channelImagesArePrivate } from "./channel-images.ts";
 import type { Diagnostics } from "./diagnostics.ts";
 import {
   validateReasoningCompatibility, readReasoningDelta, ReasoningAccumulator, encodeReasoningMessages,
@@ -77,6 +78,7 @@ export class LLM {
     const parameters = validateModelParameters(opts.provider.parameters);
     const compatibility = validateReasoningCompatibility(opts.provider.reasoning_compatibility);
     const start = Date.now();
+    const privateImages = opts.privateChannelImages === true || channelImagesArePrivate();
     this.logger.info("LLM 请求", { model: opts.provider.model });
     try {
       return await withModelResponse(
@@ -128,8 +130,12 @@ export class LLM {
               ...(observed?.tool_calls === undefined ? {} : { tool_calls: observed.tool_calls }) });
             if (obj?.usage !== undefined && obj?.usage !== null)
               trace?.emit("request.usage", { usage: obj.usage, mode: "snapshot", stage: "interim" });
-            if (obj.error) throw Error(modelErrorMessage(undefined, obj, opts.provider.api_key));
-            usage = obj.usage ?? usage;
+            if (obj.error) {
+              // Partial output is not an unsupported-input rejection before generation.
+              if (text || calls.length || reasoning.value()) throw Error(modelErrorMessage(undefined, obj, opts.provider.api_key));
+              throw upstreamModelError(undefined, obj, opts.provider.api_key);
+            }
+            if (obj.usage != null) usage = privateImages ? channelUsage(obj.usage) : obj.usage;
             const choice = obj.choices?.[0];
             if (typeof choice?.finish_reason === "string") {
               trace?.finish({ finish_reason: choice.finish_reason });
@@ -187,9 +193,10 @@ export class LLM {
         },
         opts.signal,
         this.diagnostics,
+        privateImages,
       );
     } catch (error) {
-      this.logger.error("LLM 请求失败", { error, ms: Date.now() - start });
+      this.logger.error("LLM 请求失败", { error: privateImages ? "渠道图片请求失败，原始错误不记录" : error, ms: Date.now() - start });
       throw error;
     }
   }

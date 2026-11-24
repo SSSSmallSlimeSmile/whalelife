@@ -12,7 +12,24 @@ export type ModelResponseTrace = {
   finish(data: any): void;
 };
 
-function requestCapture(diagnostics: Diagnostics | undefined, provider: ModelTransport, endpoint: string) {
+/** Keep billing and token counters while excluding unrecognised fields that may echo media. */
+export function channelUsage(usage: any) {
+  if (!usage || typeof usage !== "object") return undefined;
+  const result: Record<string, unknown> = {};
+  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "cost"])
+    if (Number.isFinite(usage[key]) && usage[key] >= 0) result[key] = usage[key];
+  for (const key of ["cost_currency", "currency"])
+    if (typeof usage[key] === "string" && /^[A-Z]{3}$/.test(usage[key])) result[key] = usage[key];
+  for (const key of ["prompt_tokens_details", "completion_tokens_details"]) {
+    const details: Record<string, number> = {};
+    for (const field of ["cached_tokens", "reasoning_tokens", "audio_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens"])
+      if (Number.isSafeInteger(usage[key]?.[field]) && usage[key][field] >= 0) details[field] = usage[key][field];
+    if (Object.keys(details).length) result[key] = details;
+  }
+  return result;
+}
+
+function requestCapture(diagnostics: Diagnostics | undefined, provider: ModelTransport, endpoint: string, privateImages: boolean) {
   try { if (!diagnostics?.enabled) return; } catch { return; }
   const sink = diagnostics!;
   const safe = (fn: () => void) => { try { fn(); } catch { /* Diagnostics must not change a model call. */ } };
@@ -31,15 +48,28 @@ function requestCapture(diagnostics: Diagnostics | undefined, provider: ModelTra
   const emit = (kind: string, data: any) => safe(() => sink.event(kind, data, context));
   const trace: ModelResponseTrace = {
     emit: (kind, data) => {
+      if (privateImages && kind === "request.usage") data = { ...data, usage: channelUsage(data.usage) };
+      if (privateImages && kind === "response.chunk") return;
       safe(() => { if (kind === "request.usage") result = { ...result, usage: data.usage, mode: data.mode, stage: data.stage }; });
       emit(kind, data);
     },
-    finish: data => safe(() => { result = { ...result, ...data }; }),
+    finish: data => safe(() => {
+      if (privateImages) {
+        // Arbitrary provider fields (including streamed errors) can echo the request.
+        for (const key of ["phase", "transport_started", "transport_started_at", "http_status", "response_received", "response_received_at"])
+          if (Object.hasOwn(data, key)) result[key] = data[key];
+      } else result = { ...result, ...data };
+    }),
   };
   return {
     trace,
     prepared(url: string, init: RequestInit) {
       safe(() => {
+        if (privateImages) {
+          started = true;
+          emit("request.start", { ...identity, phase: "prepared", method: init.method, body_omitted: "channel_images" });
+          return;
+        }
         const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
         started = true;
         emit("request.start", { ...identity, model: body?.model ?? identity.model, phase: "prepared", method: init.method, url,
@@ -52,7 +82,7 @@ function requestCapture(diagnostics: Diagnostics | undefined, provider: ModelTra
         const data = { phase: "received", http_status: response.status, status_text: response.statusText,
           headers: Object.fromEntries(response.headers), response_received_at: new Date().toISOString() };
         trace.finish({ ...data, response_received: true });
-        emit("response.chunk", data);
+        if (!privateImages) emit("response.chunk", data);
       });
     },
     async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -67,7 +97,7 @@ function requestCapture(diagnostics: Diagnostics | undefined, provider: ModelTra
         } finally {
           if (!started) emit("request.start", { ...identity, phase: "preparation_failed", body_unavailable: true });
           emit("request.end", { ...result, status,
-            ...(failure === undefined ? {} : { error: errorText(failure) }) });
+            ...(failure === undefined ? {} : { error: privateImages ? "渠道图片请求未完成" : errorText(failure) }) });
           if (independent) emit("execution.end", { status });
         }
       };
@@ -95,6 +125,31 @@ export class ModelRequestError extends Error {
     this.name = "ModelRequestError";
     this.status = status;
   }
+}
+
+export class ModelImageInputUnsupportedError extends ModelRequestError {}
+
+/** Classify only explicit input-modality errors. A generic "unsupported" cannot justify a second paid call. */
+export function upstreamModelError(status: number | undefined, body: any, secret?: string, headerId?: string | null): Error {
+  const message = modelErrorMessage(status, body, secret, headerId);
+  const raw = body?.error;
+  const reportedStatuses = [status, raw?.status, raw?.status_code, raw?.code, body?.status]
+    .filter(value => /^[1-5]\d\d$/.test(String(value))).map(Number);
+  if (reportedStatuses.every(value => value === 400 || value === 422)) {
+    const code = String(raw?.code ?? "").toLowerCase();
+    const type = String(raw?.type ?? "").toLowerCase();
+    const cause = typeof raw?.message === "string" ? raw.message.slice(0, 8192) : "";
+    const otherFailure = /auth|api.?key|permission|billing|quota|rate.?limit|timeout|context.length|overload|server.error|image.(format|size)|invalid.image|corrupt|content.policy|鉴权|权限|限流|余额|超时/i;
+    const rejectsModality = /\bmodel\b[^.\n]{0,70}(?:does not support|doesn't support|cannot (?:accept|process)) (?:any )?(?:images?\b|image_url\b|vision\b|multimodal\b)|(?:image inputs?|image_url|vision inputs?|multimodal inputs?)['"]? (?:is |are )?(?:not supported|unsupported|only supported (?:by|in) (?:certain|some) models)\b/i;
+    const onlyText = /(?:only supports?|only accepts?) text(?:ual)? (?:inputs?|messages?)\b/i;
+    const rejectsChinese = /(?:模型|接口)[^。\n]{0,18}不支持(?:图片|图像|视觉|多模态)(?:输入)?|(?:图片|图像|视觉|多模态)输入[^。\n]{0,12}不(?:受支持|支持)/;
+    const explicitCode = ["unsupported_image_input", "image_input_not_supported", "vision_not_supported", "model_not_support_vision"].includes(code);
+    const formatError = /(?:not support|unsupported|invalid|unknown).{0,30}(?:format|mime|file type|resolution|encoding|url scheme)|(?:image|图片|图像)[^。\n]{0,12}(?:格式|format|size|编码)/i;
+    if (!otherFailure.test(code + " " + type + " " + cause) && !formatError.test(cause) &&
+        (explicitCode || rejectsModality.test(cause) || onlyText.test(cause) || rejectsChinese.test(cause)))
+      return new ModelImageInputUnsupportedError(message);
+  }
+  return status === undefined ? Error(message) : new ModelRequestError(message);
 }
 
 /** Only emit recognised diagnostic categories, never a provider's arbitrary text/request echo. */
@@ -218,9 +273,10 @@ export async function withModelResponse<T>(
   consume: (response: Response, trace?: ModelResponseTrace) => Promise<T>,
   externalSignal?: AbortSignal,
   diagnostics?: Diagnostics,
+  privateChannelImages = false,
 ): Promise<T> {
   let capture: ReturnType<typeof requestCapture>;
-  try { capture = requestCapture(diagnostics, provider, endpoint); } catch { /* Optional observer setup is best effort. */ }
+  try { capture = requestCapture(diagnostics, provider, endpoint, privateChannelImages); } catch { /* Optional observer setup is best effort. */ }
   const execute = async (): Promise<T> => {
   externalSignal?.throwIfAborted();
   const seconds = timeoutSeconds(provider.timeout_seconds);
@@ -291,8 +347,8 @@ export async function withModelResponse<T>(
       let body: unknown;
       try { body = await boundedErrorBody(response, capture?.trace); } catch { /* retain the HTTP status on truncated/erroring bodies */ }
       checkAbort();
-      throw new ModelRequestError(modelErrorMessage(response.status, body, provider.api_key,
-        response.headers.get("x-request-id") ?? response.headers.get("request-id")), 502);
+      throw upstreamModelError(response.status, body, provider.api_key,
+        response.headers.get("x-request-id") ?? response.headers.get("request-id"));
     }
     try {
       return await consume(response, capture?.trace);
