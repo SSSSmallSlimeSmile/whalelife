@@ -613,3 +613,30 @@ test("failed member persistence cancels the whole turn and cannot confirm duplic
   assert.equal(JSON.stringify(rows).includes("持久化失败时的旧候选"), false);
   assert.equal(f.sessions.locks.size, 0); assert.equal(f.sessions.channelOperations.size, 0);
 });
+
+test("a member history write failure fails the whole channel turn without delivering its stale reply", async t => {
+  const f = await fixture(t), entered = deferred(), gate = f.gate();
+  f.respond(async () => { entered.resolve(); await gate.promise; return answer("old answer"); });
+  const turn = await open(f.handle, message("leader")); await entered.promise;
+  const member = message("member", "correction");
+  const save = f.memory.appendEvent.bind(f.memory);
+  let failed = false;
+  f.memory.appendEvent = async (row: any) => {
+    if (!failed && row.type === "message" && row.external_message_id === "member") {
+      failed = true;
+      throw Error("synthetic member history write failure");
+    }
+    return save(row);
+  };
+  const append = () => turn.append(member).then(result => result.status, (error: Error) => error.message);
+  const first = await append(), duplicate = await append();
+  gate.resolve();
+  const result = await turn.result(), replay = await f.handle.receive(member);
+  assert.equal(failed, true);
+  assert.deepEqual({ first, duplicate, result: result.status, replay: replay.status, sends: f.deliveries.length }, {
+    first: "accepted", duplicate: "duplicate", result: "generation_failed", replay: "generation_failed", sends: 0,
+  });
+  const rows = await f.memory.readSession(turn.sessionId);
+  assert.ok(rows.some(row => row.type === "channel_receipt" && row.external_message_id === "member" && row.input_text === "correction"));
+  assert.ok(!rows.some(row => row.role === "assistant"));
+});

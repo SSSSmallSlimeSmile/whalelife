@@ -435,15 +435,29 @@ class ConsoleApp {
       : await api("/api/session/current", input ??
       (this.sessionReady ? undefined : { legacyId: localStorage.whaleSession }));
     // 刷新时按上次读到的条数取回同样多，不然只会拿回最后一页、位置全丢
+    if (id === this.state.session) this.saveChatView();
     const savedView = this.savedView(id);
     const want = Math.min(
       Math.max(savedView ? Number(savedView.count) || 0 : 0, SESSION_PAGE),
       500,
     );
+    const pageUrl = `/api/session?id=${encodeURIComponent(id)}&limit=${want}`;
     const [page, choices] = await Promise.all([
-      api(`/api/session?id=${encodeURIComponent(id)}&limit=${want}`),
+      api(pageUrl),
       api("/api/session/list"),
     ]);
+    // Keep the oldest loaded message when a new arrival shifts the latest page.
+    while (id === this.state.session && savedView && page.hasMore && page.start > savedView.start) {
+      if (sequence !== this.sessionSync || this.state.chatBusy) return;
+      const older = await api(pageUrl + "&before=" + page.start);
+      if (!older.items.length || older.start >= page.start) break;
+      const from = older.positions.findIndex(position => position >= savedView.start);
+      if (from < 0) break;
+      page.items = older.items.slice(from).concat(page.items);
+      page.positions = older.positions.slice(from).concat(page.positions);
+      page.start = older.positions[from];
+      page.hasMore = from > 0 || older.hasMore;
+    }
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
     this.sessionReady = true;
     if (this.state.session !== id) {
@@ -452,7 +466,9 @@ class ConsoleApp {
       this.detailsOpen = new Set();
       // 换会话才回到最新一条；同一会话刷新不动位置。
       this.pendingScrollBottom = true;
-    }
+      this.chatScrolled = false;
+      clearTimeout(this.viewTimer);
+    } else if (savedView?.atBottom) this.pendingScrollBottom = true;
     this.state.session = id;
     this.state.sessions = choices.items;
     this.state.sessionName = choices.items.find(item => item.id === id)?.name || id;
@@ -462,7 +478,7 @@ class ConsoleApp {
       this.state.memoryLoadedTab = null;
     }
     localStorage.whaleSession = id;
-    this.state.messages = messageRows(page.items);
+    this.state.messages = messageRows(page.items, page.positions);
     this.state.paging = {
       total: page.total,
       start: page.start,
@@ -488,15 +504,17 @@ class ConsoleApp {
     let index = 0;
     let mid = "";
     let offset = 0;
-    for (const node of box.querySelectorAll(".message[data-index]")) {
-      const top = Number(node.offsetTop) || 0;
-      const height = Number(node.offsetHeight) || 0;
-      if (top + height > box.scrollTop) {
+    const nodes = box.querySelectorAll(".message[data-index]");
+    if (!nodes.length) return;
+    const viewportTop = box.getBoundingClientRect().top;
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom > viewportTop) {
         index = Number(node.dataset.index) || 0;
         // 序号会漂：末尾新增一条，序号对得上的其实是另一条消息。
         // id 是那条消息自己的，翻页、追加都不会变。
         mid = node.dataset.mid || "";
-        offset = box.scrollTop - top;
+        offset = viewportTop - rect.top;
         break;
       }
     }
@@ -508,6 +526,7 @@ class ConsoleApp {
           index,
           mid,
           offset,
+          atBottom: box.scrollHeight - box.scrollTop - box.clientHeight < 80,
           start: this.state.paging ? this.state.paging.start : 0,
         }),
       );
@@ -529,14 +548,12 @@ class ConsoleApp {
     this.pendingRestore = null;
     if (!saved || !box || typeof box.querySelector !== "function") return;
     // 先按消息 id 找：这才是「当时屏幕最上面那条」，序号只是兜底。
-    let node = null;
-    if (saved.mid) {
-      const mid = String(saved.mid).replace(/["\\]/g, "");
-      node = box.querySelector(`.message[data-mid="${mid}"]`);
-    }
+    let node = saved.mid && Array.from(box.querySelectorAll(".message[data-index]"))
+      .find(item => item.dataset.mid === saved.mid);
     if (!node) node = box.querySelector(`.message[data-index="${saved.index}"]`);
     if (!node) return;
-    this.setScrollTop(box, (Number(node.offsetTop) || 0) + (Number(saved.offset) || 0));
+    const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    this.setScrollTop(box, box.scrollTop + top + (Number(saved.offset) || 0));
     this.updateRuler();
   }
   async refreshSessionContext() {
@@ -752,6 +769,53 @@ class ConsoleApp {
         if (this.state.page === "logs") this.renderLogs();
         return;
       }
+      if (data.type === "append") {
+        const entered = data.status === "accepted" || data.status === "duplicate";
+        if (data.status === "accepted") this.toast("已并入本轮");
+        else if (data.status === "duplicate") this.toast("这句已经并进去了");
+        else if (data.status === "full") this.toast("本轮补充已满，这句没进去", true);
+        else if (data.reason === "queued") this.toast("这一轮还在排队，开始回复后可以再补充", true);
+        else if (data.status === "closed") this.toast("本轮未接收这条补充，可以重发", true);
+        else this.toast(data.error || "补充没送进去", true);
+        // 没进去的补充不能留成一条看着已发出的虚线气泡，原文放回输入框。
+        // 按 messageId 找，而不是只看「最后一条待定」——done 可能比这条回执先到。
+        const pending =
+          this.pendingNudge && (!data.messageId || this.pendingNudge.messageId === data.messageId)
+            ? this.pendingNudge
+            : null;
+        if (pending) this.pendingNudge = null;
+        if (!entered) {
+          const nudgeId = data.messageId ? "n_" + data.messageId : pending?.nudgeId;
+          const bubble = nudgeId && this.state.messages.find(message => message.nudgeId === nudgeId);
+          const original = bubble?.text || pending?.text || (typeof data.text === "string" ? data.text : "");
+          if (nudgeId) this.state.messages = this.state.messages.filter((m) => m.nudgeId !== nudgeId);
+          // 原文不能丢：输入框空着就放回去；已经有草稿就排进「未送达」，让用户决定重发还是丢弃
+          if (original) {
+            const box = $("chat-input");
+            if (box && !(box.value || "").trim()) {
+              box.value = original;
+              this.state.chatDraft = original;
+            } else {
+              (this.unsentNudges ||= []).push({ text: original, messageId: data.messageId || "" });
+            }
+          }
+          if (this.state.page === "chat") this.renderMessages();
+        }
+        return;
+      }
+      if (data.type === "started") {
+        // 记住这一轮的 id：两个窗口跑同一会话时，补充要落到自己那一轮上
+        this.turn = typeof data.turn === "string" ? data.turn : null;
+        return;
+      }
+      if (data.type === "reset") {
+        // 服务端把这段回复丢掉了（不会进存档），界面上的也得撤，否则刷新前后不一致
+        if (this.reply) {
+          this.reply.text = "";
+          if (this.state.page === "chat") this.renderMessages();
+        }
+        return;
+      }
       if (data.type === "context") {
         if (data.queued) {
           this.toast("当前会话正在处理其他请求，已排队等待");
@@ -783,6 +847,8 @@ class ConsoleApp {
         return;
       }
       if (data.type === "done" || data.type === "error") {
+        this.turn = null;
+        this.pendingNudge = null;
         if (data.type === "done") this.pendingSend = null;
         if (data.type === "error") {
           // 这条没发出去：撤掉乐观上屏的气泡，把原文放回输入框，省得重打一遍
@@ -869,21 +935,31 @@ class ConsoleApp {
           m.id === (persona?.model || this.state.config.bindings.chat) &&
           m.enabled,
       );
-      button.disabled = this.state.chatBusy || this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
+      // 本轮还在跑时按钮不禁用，改成「补充」：这句话并进当前回合，不另起一轮。
+      button.disabled = this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
       button.innerHTML =
-        (this.state.chatBusy ? "正在回复…" : "发送") + " " + icon("send");
+        (this.state.chatBusy ? "补充" : "发送") + " " + icon("send");
     }
     if ($("new-session")) $("new-session").disabled = this.state.chatBusy || this.sessionChanging;
   }
   sendMessage() {
     const text = ($("chat-input")?.value || "").trim();
-    if (
-      !text ||
-      !this.chatConnected ||
-      this.state.chatBusy ||
-      $("send").disabled
-    )
+    if (!text || !this.chatConnected || $("send").disabled) return;
+    // 本轮还在跑：不排队、不新起一轮，直接并进当前回合让它中途改方向。
+    if (this.state.chatBusy) {
+      // 稳定 ID：同一句重送不会写出两条历史，服务端按它去重。
+      const messageId = "nudge_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      this.chatWS.send(
+        JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text, messageId }),
+      );
+      const nudgeId = "n_" + messageId;
+      this.state.messages.push({ role: "user", text, nudge: true, nudgeId });
+      this.pendingNudge = { text, nudgeId, messageId };
+      this.state.chatDraft = "";
+      $("chat-input").value = "";
+      this.renderMessages();
       return;
+    }
     this.state.messages.push({ role: "user", text });
     // 记下这一条，服务端没接住时好把原文放回输入框
     this.pendingSend = { text, index: this.state.messages.length - 1 };
@@ -963,7 +1039,7 @@ class ConsoleApp {
     this.state.messages.forEach((m, index) => {
       if (m === this.reply && !this.replyVisible()) return;
       parts.push(
-        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}" data-index="${index}" data-mid="${e(String(m.id || index))}" data-detail-key="${e(keyOf(m, index))}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
+        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}${m.nudge ? " nudge" : ""}" data-index="${index}" data-mid="${e(String(m.id || index))}" data-detail-key="${e(keyOf(m, index))}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
       );
     });
     box.innerHTML = parts.join("");
@@ -977,6 +1053,7 @@ class ConsoleApp {
     this.setScrollTop(box, stick ? box.scrollHeight : prevTop);
     this.ensureChatScroll();
     if (this.pendingRestore) this.restoreChatView(box);
+    this.renderUnsentNudges();
   }
   takeScrollPin() {
     const pin = this.pendingScrollBottom === true;
@@ -1017,7 +1094,7 @@ class ConsoleApp {
       box.dataset.scrollBound = "1";
       // 只有真的动手滚过，才允许触顶自动翻页；否则初次加载就会一直往前翻。
       const wake = () => {
-        this.chatScrolled = true;
+        if (box === $("messages")) this.chatScrolled = true;
       };
       box.addEventListener("wheel", wake, { passive: true });
       box.addEventListener("touchmove", wake, { passive: true });
@@ -1025,6 +1102,7 @@ class ConsoleApp {
       box.addEventListener(
         "scroll",
         () => {
+          if (box !== $("messages")) return;
           this.updateRuler();
           // 位置攒一下再写，滚动一次不要连着写几十遍 localStorage
           if (this.viewTimer) clearTimeout(this.viewTimer);
@@ -1121,14 +1199,14 @@ class ConsoleApp {
         `/api/session?id=${encodeURIComponent(id)}&before=${paging.start}` +
           `&limit=${SESSION_PAGE}`,
       );
-      if (id !== this.state.session) return;
+      if (paging !== this.state.paging || box !== $("messages") || id !== this.state.session) return;
       this.state.paging = {
         total: page.total,
         start: page.start,
         end: page.end,
         hasMore: page.hasMore,
       };
-      const rows = messageRows(page.items);
+      const rows = messageRows(page.items, page.positions);
       if (!rows.length) return;
       this.state.messages = rows.concat(this.state.messages);
       this.renderMessages({ anchor: "keep" });
@@ -1152,6 +1230,53 @@ class ConsoleApp {
     bubble.innerHTML = renderRich(this.reply.text);
     box.querySelector('.message[data-thinking="1"]')?.remove();
     if (nearBottom) box.scrollTop = box.scrollHeight;
+    this.updateRuler();
+  }
+  /** 被拒且没处放的补充排在这里：能重发，也能显式丢掉。不碰输入框里正在写的草稿。 */
+  renderUnsentNudges() {
+    const bar = $("nudge-unsent");
+    // 页面没渲染这一块，或者和消息容器是同一个节点（桩环境里常见），就别碰它，
+    // 否则清空自己就等于把正文一起擦了。
+    if (!bar || bar === $("messages")) return;
+    const list = this.unsentNudges || [];
+    if (!list.length) {
+      bar.hidden = true;
+      bar.innerHTML = "";
+      return;
+    }
+    bar.hidden = false;
+    bar.innerHTML =
+      `<span class="nudge-unsent-label">没送进去 ${list.length} 条</span>` +
+      list
+        .map(
+          (item, index) =>
+            `<span class="nudge-unsent-item" title="${e(item.text)}">${e(item.text.length > 24 ? item.text.slice(0, 24) + "…" : item.text)}` +
+            `<button type="button" class="btn small" data-nudge-resend="${index}">重发</button>` +
+            `<button type="button" class="btn small" data-nudge-drop="${index}">丢弃</button></span>`,
+        )
+        .join("");
+    if (bar.dataset.bound) return;
+    bar.dataset.bound = "1";
+    bar.addEventListener("click", (event) => {
+      const resend = event.target.closest("[data-nudge-resend]");
+      const drop = event.target.closest("[data-nudge-drop]");
+      if (!resend && !drop) return;
+      const index = Number((resend || drop).dataset[resend ? "nudgeResend" : "nudgeDrop"]);
+      const item = (this.unsentNudges || [])[index];
+      if (!item) return;
+      if (drop) {
+        this.unsentNudges.splice(index, 1);
+        this.renderUnsentNudges();
+        return;
+      }
+      this.unsentNudges.splice(index, 1);
+      const box = $("chat-input");
+      if (!box) return;
+      box.value = box.value.trim() ? item.text + "\n" + box.value : item.text;
+      this.state.chatDraft = box.value;
+      this.renderUnsentNudges();
+      box.focus();
+    });
   }
   filteredLogs() {
     return this.state.logs.filter(
@@ -1183,11 +1308,11 @@ const pickThinkingFace = () => thinkingFaces[Math.floor(Math.random() * thinking
 const SESSION_PAGE = 40;
 
 /** 会话行 → 气泡数组；首屏与续页共用一份映射。 */
-function messageRows(rows) {
+function messageRows(rows, positions) {
   return rows
     .filter((row) => row.type === "message")
-    .map((row) => ({
-      id: row.id,
+    .map((row, index) => ({
+      id: row.id || (positions ? "historical-line:" + positions[index] : undefined),
       role: row.role,
       text: row.text,
       protocolOriginal: row.tool_protocol_original,

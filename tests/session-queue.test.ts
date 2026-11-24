@@ -307,3 +307,83 @@ test("WebSocket reports waiting, keeps its original session after switching, the
   assert.ok((await f.app.memory.readSession(f.id)).some((x: any) => x.text === "网页等待消息"));
   assert.deepEqual(await f.app.memory.readSession(other), []);
 });
+
+async function webChatClient(t: TestContext, f: Awaited<ReturnType<typeof fixture>>) {
+  const url = "http://127.0.0.1:" + f.app.web.server.address().port;
+  const login = await fetch(url + "/api/login", { method: "POST", body: "{}" });
+  const cookie = login.headers.get("set-cookie")!.split(";")[0];
+  const ws = new WebSocket(url.replace("http", "ws") + "/ws/chat", { headers: { Cookie: cookie } });
+  t.after(() => ws.terminate());
+  const events: any[] = [];
+  ws.on("message", raw => events.push(JSON.parse(raw.toString())));
+  await once(ws, "open");
+  return { events, send: (data: any) => ws.send(JSON.stringify({ session: f.id, ...data })) };
+}
+
+test("Web supplements stay in their own turn and a failed history write stops the model", async t => {
+  const f = await fixture(t), gate = f.hold();
+  const a = await webChatClient(t, f), b = await webChatClient(t, f);
+  a.send({ expectedSession: f.id, text: "first" }); await gate.started;
+  b.send({ expectedSession: f.id, text: "second" });
+  b.send({ append: true, messageId: "before_start", text: "too early" });
+  await until(() => b.events.some(x => x.queued));
+  const turnB = b.events.find(x => x.type === "started").turn;
+  b.send({ append: true, turn: turnB, messageId: "while_waiting", text: "queued input" });
+  await until(() => b.events.some(x => x.messageId === "while_waiting"));
+  assert.equal(b.events.find(x => x.messageId === "before_start").status, "closed");
+  assert.equal(b.events.find(x => x.messageId === "while_waiting").reason, "queued");
+
+  const turnA = a.events.find(x => x.type === "started").turn;
+  const addition = { append: true, turn: turnA, messageId: "first_addition", text: "keep this" };
+  a.send(addition); a.send(addition);
+  await until(() => a.events.filter(x => x.messageId === addition.messageId).length === 2);
+  assert.deepEqual(a.events.filter(x => x.messageId === addition.messageId).map(x => x.status), ["accepted", "duplicate"]);
+  a.send({ ...addition, text: "different text with same ID" });
+  await until(() => a.events.some(x => x.status === "rejected"));
+  const save = f.app.memory.appendEvent.bind(f.app.memory);
+  f.app.memory.appendEvent = async (row: any) => {
+    if (row.type === "message" && row.external_message_id === "missing_row") throw Error("synthetic history failure");
+    return save(row);
+  };
+  a.send({ append: true, turn: turnA, messageId: "missing_row", text: "lost input" });
+  await until(() => a.events.some(x => x.messageId === "missing_row"));
+  const failure = a.events.find(x => x.messageId === "missing_row");
+  assert.equal(failure.status, "rejected");
+  assert.equal(failure.text, "lost input");
+  gate.release();
+  await until(() => a.events.some(x => x.type === "error") && b.events.some(x => x.type === "done"));
+  assert.ok(!a.events.some(x => x.type === "done"));
+  const rows = (await f.app.memory.readSession(f.id)).filter((row: any) => row.type === "message");
+  assert.deepEqual(rows.map((row: any) => row.text), ["first", "keep this", "second", "完成"]);
+});
+
+test("a sealed Web turn acknowledges its duplicates and rejects new text until done", async t => {
+  const f = await fixture(t), model = f.hold(), client = await webChatClient(t, f);
+  const writing = deferred(), release = deferred();
+  const save = f.app.memory.appendEvent.bind(f.app.memory);
+  f.app.memory.appendEvent = async (row: any) => {
+    if (row.type === "message" && row.role === "assistant") { writing.resolve(); await release.promise; }
+    return save(row);
+  };
+  try {
+    client.send({ expectedSession: f.id, text: "question" });
+    await model.started;
+    await until(() => client.events.some(x => x.type === "started"));
+    const turn = client.events.find(x => x.type === "started").turn;
+    const member = { append: true, turn, messageId: "already_saved", text: "accepted addition" };
+    client.send(member);
+    await until(() => client.events.some(x => x.status === "accepted"));
+    model.release(); await writing.promise;
+    client.send(member);
+    client.send({ ...member, messageId: "too_late", text: "late addition" });
+    await until(() => client.events.filter(x => x.type === "append").length === 3);
+    const duplicate = client.events.filter(x => x.messageId === member.messageId).at(-1);
+    const late = client.events.find(x => x.messageId === "too_late");
+    assert.equal(duplicate.status, "duplicate");
+    assert.deepEqual(late, { type: "append", status: "closed", messageId: "too_late", text: "late addition" });
+  } finally { release.resolve(); }
+  await until(() => client.events.some(x => x.type === "done"));
+  const rows = await f.app.memory.readSession(f.id);
+  assert.equal(rows.filter((row: any) => row.text === "accepted addition").length, 1);
+  assert.ok(!rows.some((row: any) => row.text === "late addition"));
+});

@@ -17,7 +17,7 @@ import {
 import { join, dirname, relative, resolve, sep, parse } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { StringDecoder } from "node:string_decoder";
+import { outgoingMessage } from "./channel-history.ts";
 import type { Logger } from "./logger.ts";
 export const safeId = (id: string) => {
   if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
@@ -115,6 +115,39 @@ async function regularTree(folder: string): Promise<string[]> {
   }
   return result;
 }
+type DeliveryLines = { receipt?: number; message?: number };
+type EpisodeIndex = {
+  size: number; ino: number; dev: number; mtimeMs: number; ctimeMs: number; terminated: boolean;
+  lines: number; marks: number[]; deliveries: Map<string, DeliveryLines>;
+};
+const markInterval = 256;
+
+// Byte offsets refer to physical lines, including blanks. Decode only complete UTF-8 records.
+async function* episodeLines(file: string, start: number, end: number) {
+  const handle = await open(file, "r");
+  let position = start;
+  let parts: Buffer[] = [];
+  try {
+    while (position < end) {
+      const buffer = Buffer.allocUnsafe(Math.min(65536, end - position));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (!bytesRead) throw Error("读取期间记忆文件发生变化");
+      let from = 0;
+      for (let newline = buffer.subarray(0, bytesRead).indexOf(10); newline >= 0;
+           newline = buffer.subarray(0, bytesRead).indexOf(10, from)) {
+        const piece = buffer.subarray(from, newline);
+        const line = parts.length ? Buffer.concat([...parts, piece]) : piece;
+        parts = [];
+        from = newline + 1;
+        yield { line, next: position + from, terminated: true };
+      }
+      if (from < bytesRead) parts.push(buffer.subarray(from, bytesRead));
+      position += bytesRead;
+    }
+    if (parts.length) yield { line: Buffer.concat(parts), next: end, terminated: false };
+  } finally { await handle.close(); }
+}
+
 export class Memory {
   root: string;
   logger: Logger;
@@ -504,158 +537,115 @@ export class Memory {
     }
     return result.slice(-limit);
   }
-  /**
-   * 只解析末尾 window 行。长会话翻页时不必把整份历史都 JSON.parse 一遍：
-   * 读文件仍然是一次顺序读，但解析量被压到一页。
-   * start 是窗口第一行在整个会话里的行号，0 表示窗口盖到了开头。
-   */
-  /** 行数按 (大小, 行数) 记住：会话文件只追加，下一次数新增那段就够。 */
-  /** 每多少行记一个字节偏移：翻深页时靠它直接定位，不用从头读。 */
-  private readonly lineMark = 256;
-  private lineCounts = new Map<string, { size: number; lines: number; marks: number[] }>();
-  private async countLines(file: string) {
-    const info = await stat(file);
-    const cached = this.lineCounts.get(file);
-    if (cached && cached.size === info.size) return cached.lines;
-    const from = cached && cached.size < info.size ? cached.size : 0;
-    let lines = from ? cached!.lines : 0;
-    const marks = from ? cached!.marks.slice() : [0];
-    const handle = await open(file, "r");
-    try {
-      const chunk = 1 << 16;
-      const buffer = Buffer.alloc(chunk);
-      let position = from;
-      while (position < info.size) {
-        const { bytesRead } = await handle.read(buffer, 0, Math.min(chunk, info.size - position), position);
-        if (!bytesRead) break;
-        for (let i = 0; i < bytesRead; i += 1) {
-          if (buffer[i] !== 10) continue;
-          lines += 1;
-          if (lines % this.lineMark === 0) marks.push(position + i + 1);
-        }
-        position += bytesRead;
-      }
-    } finally {
-      await handle.close();
-    }
-    this.lineCounts.set(file, { size: info.size, lines, marks });
-    return lines;
-  }
-  /** 只把文件末尾 wanted 行读回来：翻一页不必把整份历史重新读一遍。 */
-  private async tailLines(file: string, wanted: number) {
-    const info = await stat(file);
-    if (!info.size || wanted <= 0) return [] as string[];
-    const handle = await open(file, "r");
-    try {
-      let span = Math.max(1 << 16, wanted * 256);
-      for (;;) {
-        const from = Math.max(0, info.size - span);
-        const buffer = Buffer.alloc(info.size - from);
-        await handle.read(buffer, 0, buffer.length, from);
-        const lines = buffer.toString("utf8").split("\n").filter((line) => line.trim());
-        if (from === 0 || lines.length >= wanted) {
-          // 从中间读起时第一行多半是被截断的半行，丢掉
-          if (from > 0 && lines.length) lines.shift();
-          return lines.slice(-wanted);
-        }
-        span *= 2;
-      }
-    } finally {
-      await handle.close();
-    }
-  }
-  /**
-   * 取一段行 [from, to)。行号靠稀疏索引定位：每 lineMark 行记一个字节偏移，
-   * 翻深页时只读这一小截字节，不再把整份历史读进来再切。
-   */
-  private async segmentLines(file: string, count: number, from: number, to: number) {
-    const wanted = to - from;
-    if (wanted <= 0) return [] as string[];
-    const cached = this.lineCounts.get(file);
-    if (cached?.marks.length) {
-      const mark = Math.floor(from / this.lineMark);
-      const skip = from - mark * this.lineMark;
-      const slice = await this.sliceFrom(file, cached.marks[mark] ?? 0, skip + wanted);
-      const picked = slice.slice(skip, skip + wanted);
-      if (picked.length) return picked;
-    }
-    if (to === count) return this.tailLines(file, wanted);
-    const raw = await readFile(file, "utf8");
-    const all = raw.split("\n").filter((line) => line.trim());
-    return all.slice(from, to);
-  }
-  /** 从 byteFrom 起读够 need 行就停：只碰一页的量级，不扫文件其余部分。 */
-  private async sliceFrom(file: string, byteFrom: number, need: number) {
-    if (need <= 0) return [] as string[];
-    const info = await stat(file);
-    const handle = await open(file, "r");
-    const decoder = new StringDecoder("utf8");
-    try {
-      const chunk = 1 << 16;
-      const buffer = Buffer.alloc(chunk);
-      const rows: string[] = [];
-      let pending = "";
-      let position = byteFrom;
-      while (position < info.size && rows.length < need) {
-        const { bytesRead } = await handle.read(buffer, 0, Math.min(chunk, info.size - position), position);
-        if (!bytesRead) break;
-        position += bytesRead;
-        pending += decoder.write(buffer.subarray(0, bytesRead));
-        const split = pending.split("\n");
-        pending = split.pop() ?? "";
-        for (const line of split) rows.push(line);
-      }
-      pending += decoder.end();
-      if (pending && rows.length < need) rows.push(pending);
-      return rows.slice(0, need);
-    } finally {
-      await handle.close();
-    }
-  }
-  async readSessionWindow(id: string, window: number, until?: number) {
-    const paths = await this.episodePaths(id);
-    for (const file of paths) {
-      const info = await lstat(file);
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
-        throw Error("记忆文件不能为链接");
-    }
-    const size = Math.max(1, Math.floor(window));
-    const counts: number[] = [];
-    for (const file of paths) counts.push(await this.countLines(file));
-    const total = counts.reduce((sum, value) => sum + value, 0);
-    // until 是下一页的终点（不含）。翻旧页时只读这一截，不从文件尾巴重新取。
-    // 游标 0 也是合法值（前面已经没有消息了）：以前当成「没给」，于是又返回最后一屏，
-    // 前端拿着 0 再翻一次就收到同一条消息，看着像卡住不动。
-    const end = Number.isFinite(until) && (until as number) >= 0 ? Math.min(total, Math.floor(until as number)) : total;
-    const start = Math.max(0, end - size);
-    const rows: any[] = [];
-    if (start >= end) return { rows, start, total };
-    let cursor = 0;
-    for (let index = 0; index < paths.length; index += 1) {
-      const till = cursor + counts[index];
-      const from = Math.max(0, start - cursor);
-      cursor = till;
-      if (till <= start) continue;
-      const base = till - counts[index];
-      const sliceFrom = Math.max(start, base) - base;
-      const sliceTo = Math.min(counts[index], end - base);
-      if (sliceTo <= sliceFrom) continue;
-      const lines = await this.segmentLines(paths[index], counts[index], sliceFrom, sliceTo);
-      const first = base + sliceFrom;
-      for (let i = 0; i < lines.length; i += 1) {
-        const at = first + i;
-        // 窗口外的行不解析：以前整份历史都要 JSON.parse 一遍
-        if (at < start || at >= end) continue;
-        try {
-          rows.push(JSON.parse(lines[i]));
-        } catch {
-          if (at !== total - 1) throw Error("JSONL 中间行损坏：" + id);
-          this.logger.warn("忽略 JSONL 最后半行", { file: id });
+  private episodeIndexes = new Map<string, EpisodeIndex>();
+  private async indexEpisode(file: string) {
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw Error("记忆文件不能为链接");
+    const previous = this.episodeIndexes.get(file);
+    const sameFile = previous?.ino === info.ino && previous.dev === info.dev;
+    if (sameFile && previous.size === info.size && previous.mtimeMs === info.mtimeMs &&
+        previous.ctimeMs === info.ctimeMs) return previous;
+    const append = sameFile && previous.terminated && previous.size < info.size;
+    const index: EpisodeIndex = {
+      size: info.size, ino: info.ino, dev: info.dev, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs,
+      terminated: true, lines: append ? previous.lines : 0,
+      marks: append ? previous.marks.slice() : [0],
+      deliveries: new Map(append ? previous.deliveries : []),
+    };
+    for await (const { line, next, terminated } of episodeLines(file, append ? previous.size : 0, info.size)) {
+      // A receipt type or its generated sent_ ID must occur literally, or as a JSON Unicode escape.
+      // Ordinary rows only need a newline count for the sparse index.
+      if (line.includes('"channel_receipt"') || line.includes('"sent_') || line.includes('\\u')) {
+        let row;
+        try { row = JSON.parse(line.toString("utf8")); } catch { /* validated when this line is requested */ }
+        const projected = outgoingMessage(row?.session, row);
+        const key = projected?.id ?? (row?.type === "message" && typeof row.id === "string" &&
+          row.id.startsWith("sent_") ? row.id : undefined);
+        if (key) {
+          const refs = index.deliveries.get(key);
+          index.deliveries.set(key, projected
+            ? { ...refs, receipt: refs?.receipt ?? index.lines }
+            : { ...refs, message: index.lines });
         }
       }
-      if (cursor >= end) break;
+      index.lines += 1;
+      index.terminated = terminated;
+      if (index.lines % markInterval === 0) index.marks.push(next);
     }
-    return { rows, start, total };
+    this.episodeIndexes.set(file, index);
+    return index;
+  }
+  private async indexedEpisodes(id: string) {
+    const files = [];
+    let total = 0;
+    for (const file of await this.episodePaths(id)) {
+      const index = await this.indexEpisode(file);
+      files.push({ file, index, base: total });
+      total += index.lines;
+    }
+    return { files, total };
+  }
+  private async *readEpisodeRows(file: string, index: EpisodeIndex, from: number, end: number) {
+    const mark = Math.floor(from / markInterval);
+    let at = mark * markInterval;
+    for await (const { line, terminated } of episodeLines(file, index.marks[mark], index.size)) {
+      if (at >= from) {
+        const text = line.toString("utf8");
+        if (text.trim()) {
+          let row;
+          try { row = JSON.parse(text); }
+          catch {
+            if (terminated) throw Error("JSONL 中间行损坏：" + file);
+            this.logger.warn("忽略 JSONL 最后半行", { file });
+          }
+          if (row !== undefined) yield { at, row };
+        }
+      }
+      if (++at >= end) break;
+    }
+  }
+  /** Project at the first sent receipt, using the last materialized message when present. */
+  async readConversationPage(id: string, limit: number, before?: number) {
+    const { files, total } = await this.indexedEpisodes(id);
+    const until = Math.min(before ?? total, total);
+    const newest: { at: number; row: any }[] = [];
+    for (let i = files.length - 1; i >= 0 && newest.length <= limit; i--) {
+      const { file, index, base } = files[i];
+      let end = Math.min(index.lines, until - base);
+      while (end > 0 && newest.length <= limit) {
+        const start = Math.max(0, end - Math.max(limit + 1, 120));
+        const entries = [];
+        for await (const entry of this.readEpisodeRows(file, index, start, end)) entries.push(entry);
+        for (const { at, row } of entries.reverse()) {
+          const projected = outgoingMessage(row.session, row);
+          if (!projected && row.type !== "message") continue;
+          const key = projected?.id ?? row.id;
+          let message = row;
+          if (typeof key === "string" && key.startsWith("sent_")) {
+            const first = files.find(part => part.index.deliveries.get(key)?.receipt !== undefined);
+            if (first) {
+              if (!projected || first !== files[i] || first.index.deliveries.get(key)!.receipt !== at) continue;
+              message = projected;
+              const last = files.findLast(part => part.index.deliveries.get(key)?.message !== undefined);
+              if (last) {
+                const line = last.index.deliveries.get(key)!.message!;
+                for await (const entry of this.readEpisodeRows(last.file, last.index, line, line + 1)) message = entry.row;
+              }
+            }
+          }
+          newest.push({ at: base + at, row: message });
+          if (newest.length > limit) break;
+        }
+        end = start;
+      }
+    }
+    const hasMore = newest.length > limit;
+    if (hasMore) newest.pop();
+    newest.reverse();
+    return {
+      items: newest.map(entry => entry.row), positions: newest.map(entry => entry.at), total,
+      start: newest[0]?.at ?? 0, end: newest.length ? newest[newest.length - 1].at + 1 : 0, hasMore,
+    };
   }
   appendEvent(line: any, options: { once?: boolean } = {}) {
     return this.serial(async () => {

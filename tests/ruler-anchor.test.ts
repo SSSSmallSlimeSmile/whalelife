@@ -64,6 +64,7 @@ class FakeNode {
   offsetTop: number;
   offsetHeight: number;
   children: FakeNode[];
+  parent?: FakeNode;
   hidden: boolean;
   innerHTML: string;
   classList: { toggle: () => void };
@@ -81,8 +82,15 @@ class FakeNode {
   }
   addEventListener() {}
   removeEventListener() {}
+  getBoundingClientRect() {
+    const top = this.offsetTop - (this.parent?.scrollTop ?? 0);
+    return { top, bottom: top + this.offsetHeight };
+  }
   querySelectorAll(sel: string) {
-    if (sel.includes("data-index")) return this.children;
+    if (sel.includes("data-index")) {
+      for (const child of this.children) child.parent = this;
+      return this.children;
+    }
     return [];
   }
   querySelector(sel: string) {
@@ -176,11 +184,11 @@ test("换成新轨元素、尺寸完全一样，也要重新画出刻度", () =>
 
 test("记阅读位置时存的是消息 id，不是序号", () => {
   const nodes = [
-    new FakeNode({ dataset: { index: "0", mid: "m-1" }, offsetTop: 0, offsetHeight: 100 }),
-    new FakeNode({ dataset: { index: "1", mid: "m-2" }, offsetTop: 100, offsetHeight: 100 }),
-    new FakeNode({ dataset: { index: "2", mid: "m-3" }, offsetTop: 200, offsetHeight: 100 }),
+    new FakeNode({ dataset: { index: "0", mid: "m-1" }, offsetTop: 360, offsetHeight: 100 }),
+    new FakeNode({ dataset: { index: "1", mid: "m-2" }, offsetTop: 460, offsetHeight: 100 }),
+    new FakeNode({ dataset: { index: "2", mid: "m-3" }, offsetTop: 560, offsetHeight: 100 }),
   ];
-  const box = new FakeNode({ dataset: {}, clientHeight: 200, scrollHeight: 300, children: nodes });
+  const box = new FakeNode({ dataset: {}, offsetTop: 360, clientHeight: 200, scrollHeight: 300, children: nodes });
   box.scrollTop = 130;
   const app = makeApp({ "chat-ruler": new FakeNode({ dataset: {} }), messages: box });
   app.state.session = "s1";

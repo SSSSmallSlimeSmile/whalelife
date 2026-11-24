@@ -1,9 +1,53 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { join } from "node:path";
 import { boot } from "../core/index.ts";
+import { Memory } from "../core/memory.ts";
+import { Logger } from "../core/logger.ts";
+import { conversationRows, outgoingMessage } from "../core/channel-history.ts";
+
+test("会话分页跨月份使用首个已发送回执的位置和与完整历史相同的正文", async () => {
+  const root = await temporaryDirectory("whale-paging-months-");
+  const memory = new Memory(root, new Logger(root, { level: "error" }));
+  const session = "history", folder = join(memory.sessionDir(session), "episodes");
+  await mkdir(folder, { recursive: true });
+  const gap = Array.from({ length: 125 }, () => ({ type: "tool", session }));
+  const receipt = { type: "channel_receipt", session, direction: "out", status: "sent",
+    delivery_id: "first", text: "回执", sent_at: "2026-01-01T00:00:00Z" };
+  const next = { ...receipt, delivery_id: "second" };
+  const first = { ...outgoingMessage(session, receipt), text: "入档正文" };
+  const second = { ...outgoingMessage(session, next), text: "先写入的正文" };
+  const january = [receipt, ...gap, second];
+  const february = [first, receipt, ...gap, next, next];
+  for (const [file, rows] of [["2026-01", january], ["2026-02", february]] as const)
+    await writeFile(join(folder, file + ".jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+  const expected = conversationRows(await memory.readSession(session)).filter(row => row.type === "message");
+  const latest = await memory.readConversationPage(session, 1);
+  const older = await memory.readConversationPage(session, 1, latest.start);
+  assert.deepEqual([...older.items, ...latest.items], expected);
+  assert.deepEqual(older.positions, [0]);
+  assert.equal(older.hasMore, false);
+  assert.deepEqual((await memory.readConversationPage(session, 1, 0)).items, []);
+});
+
+test("分页兼容空行、没有换行的合法末行、残行和替换后的索引", async () => {
+  const root = await temporaryDirectory("whale-paging-tail-");
+  const memory = new Memory(root, new Logger(root, { level: "error" }));
+  const session = "legacy", folder = join(memory.sessionDir(session), "episodes"), file = join(folder, "legacy.jsonl");
+  await mkdir(folder, { recursive: true });
+  const row = (text: string) => JSON.stringify({ type: "message", session, text });
+  await writeFile(file, row("甲") + "\n\n" + row("乙"));
+  const read = async () => (await memory.readConversationPage(session, 10)).items.map(item => item.text);
+  assert.deepEqual(await read(), ["甲", "乙"]);
+  await appendFile(file, "\n" + row("丙") + "\n{");
+  assert.deepEqual(await read(), ["甲", "乙", "丙"]);
+  const restored = join(folder, "restored");
+  await writeFile(restored, row("丁") + "\n");
+  await rename(restored, file);
+  assert.deepEqual(await read(), ["丁"]);
+});
 
 /**
  * 会话分页的三条契约：
