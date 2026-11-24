@@ -638,7 +638,7 @@ class ConsoleApp {
     const total = (this.railTurns || []).length;
     if (!total) return;
     const size = this.railBatch || 48;
-    const step = Math.max(1, size - 4);
+    // 翻页按整批走，批次不重叠：格子数和「一批」对得上，提示的区间就是点下去真正到的那一批（勘 2026-11-25）
     const from = Number.isFinite(this.railStart) ? this.railStart : Math.max(0, total - size);
     if (dir === "latest") {
       this.railPinned = true;
@@ -650,7 +650,7 @@ class ConsoleApp {
     }
     // 手动翻页就是脱离「跟随最新」。旧写法把 pinned 设成「后面还有没有内容」，
     // 翻到早期批次后 pinned 仍是 true，下一次滚动就把这一批拽回末尾——看着像导航失灵（勘 2026-11-25 修）。
-    const start = dir === "prev" ? from - step : from + step;
+    const start = dir === "prev" ? from - size : from + size;
     this.railPinned = false;
     this.railStart = Math.max(0, Math.min(start, Math.max(0, total - size)));
     this.hideRailCard();
@@ -681,10 +681,16 @@ class ConsoleApp {
     let head = "";
     let body = "";
     let meta = "";
-    if (tick.dataset.page) {
-      const step = Math.max(1, size - 4);
-      const lo = tick.dataset.page === "prev" ? Math.max(0, start - step) : start + size;
-      const hi = Math.min(total, lo + step);
+    if (tick.dataset.page === "latest") {
+      // 倒数第一格固定是「最新的一轮」，不是「又一批」（勘 2026-11-25 修）
+      head = "最新的一轮";
+      body = "第 " + total + " 轮";
+      meta = "共 " + total + " 轮 · 点一下跳回最新的对话";
+    } else if (tick.dataset.page) {
+      // 提示的是「点下去会落到哪一批」，和 railPage 的落点一致，不是拍脑袋的区间（勘 2026-11-25）
+      const raw = tick.dataset.page === "prev" ? start - size : start + size;
+      const lo = Math.max(0, Math.min(raw, Math.max(0, total - size)));
+      const hi = Math.min(total, lo + size);
       head = tick.dataset.page === "prev" ? "更早的一批" : "后面的一批";
       body = "第 " + (lo + 1) + "–" + hi + " 轮";
       meta = "共 " + total + " 轮 · 点一下换这一批";

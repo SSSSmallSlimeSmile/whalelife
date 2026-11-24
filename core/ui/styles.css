@@ -2409,6 +2409,13 @@ dialog::backdrop {
   width: 14px;
   opacity: 1;
 }
+/* 倒数第一格固定是「最新的一轮」：实心加粗，和「后面的一批」区分开（勘 2026-11-25） */
+.chat-rail .chat-rail-tick.chat-rail-page.chat-rail-latest i {
+  width: 8px;
+  height: 2px;
+  opacity: 0.85;
+}
+
 .chat-rail-card {
   position: fixed;
   z-index: 60;
