@@ -47,3 +47,32 @@ export function conversationRows(rows: any[]): any[] {
   }
   return result;
 }
+
+/**
+ * 与 conversationRows 同一套判据，但保留每行在整份历史里的行号。
+ * 分页取窗口时要靠这个行号当游标，所以不能先投影再切页——
+ * 旧渠道的 sent 回执会被投影成助手正文，按原始 type 过滤会把它整条漏掉。
+ */
+export function conversationWindows(entries: { row: any; at: number }[]): { row: any; at: number; via: "receipt" | "row" }[] {
+  const messages = new Map(entries.filter(e => e.row.type === "message" && e.row.id).map(e => [e.row.id, e.row]));
+  const projected = new Map<string, any>();
+  for (const entry of entries) {
+    const message = outgoingMessage(entry.row.session, entry.row);
+    if (message && !projected.has(message.id)) projected.set(message.id, messages.get(message.id) ?? message);
+  }
+  const seen = new Set<string>();
+  const out: { row: any; at: number; via: "receipt" | "row" }[] = [];
+  for (const entry of entries) {
+    const message = outgoingMessage(entry.row.session, entry.row);
+    if (message) {
+      if (!seen.has(message.id)) {
+        seen.add(message.id);
+        out.push({ row: projected.get(message.id), at: entry.at, via: "receipt" });
+      }
+      continue;
+    }
+    // 只留真正会显示成气泡的行：工具记录不占一页，否则前端滤完就成空白页
+    if (entry.row.type === "message" && !projected.has(entry.row.id)) out.push({ ...entry, via: "row" });
+  }
+  return out;
+}

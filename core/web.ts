@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Channels } from "./channels.ts";
-import { conversationRows } from "./channel-history.ts";
+import { conversationRows, conversationWindows } from "./channel-history.ts";
 import { PluginWebRegistry } from "./plugin-web.ts";
 import { WebClientDisconnectedError } from "./web-errors.ts";
 import { OfficialPlugins } from "./official-plugins.ts";
@@ -532,9 +532,61 @@ export async function startWeb(config: any, services: any, runtime: any) {
         } finally { res.off("close", cancel); }
       }
       if (req.method === "GET" && req.url?.startsWith("/api/session?")) {
-        const id = new URL(req.url, origin).searchParams.get("id");
+        const params = new URL(req.url, origin).searchParams;
+        const id = params.get("id");
         if (!id) return send(400, { error: "请提供会话 ID" });
-        return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        // 不传分页参数时保持旧契约：最近 100 条的数组，旧调用方照旧能 rows.filter
+        if (!params.has("limit") && !params.has("before"))
+          return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        const asked = Number(params.get("limit"));
+        const limit =
+          Number.isFinite(asked) && asked > 0
+            ? Math.min(Math.floor(asked), 500)
+            : 40;
+        // before 给没给要分开：0 是「前面已经没有了」，不是「没给」。
+        const hasBefore = params.has("before");
+        const beforeRaw = Number(params.get("before"));
+        const before =
+          hasBefore && Number.isFinite(beforeRaw) && beforeRaw >= 0 ? Math.floor(beforeRaw) : 0;
+        // 页边界按「可显示的聊天消息」算：工具记录不算一页，否则整页会被前端滤空。
+        // 游标是窗口第一行在整份历史里的绝对行号：往前扩窗口时同一条消息的编号不变。
+        // 以前用窗口内序号当游标，翻到第三页就跳回最后一屏，最早那几页永远够不着。
+        let window = Math.max(limit * 3, 120);
+        // 投递的两半被页边界劈开时，光往回扩还不够：对方可能在前方（比游标新）。
+        // 这时放开终点再取一次，只把结果按游标过滤。
+        let relaxed = false;
+        for (;;) {
+          // 游标直接限定这次读到哪里：翻旧页不再先取文件尾巴再过滤
+        const tail = await memory.readSessionWindow(id, window, relaxed || !hasBefore ? undefined : before);
+          // 不能按原始 type 过滤：旧渠道的 sent 回执会被投影成助手正文，
+          // 按类型滤会把它整条漏掉（不分页时反而看得到）。走与 conversationRows 同一套判据。
+          const marked = conversationWindows(
+            tail.rows.map((row: any, index: number) => ({ row, at: tail.start + index })),
+          );
+          const older = hasBefore ? marked.filter((item: any) => item.at < before) : marked;
+          // 同一次投递的 sent 回执和正文行如果落在窗口两侧，会各冒一个气泡。
+          // 往回扩窗口把它们收进同一个窗口，projection 才会去重。
+          const sliceProbe = older.slice(-limit);
+          const splitGroup = sliceProbe.some((item: any) => item.via === "row" && item.row?.delivery_id);
+          if (splitGroup && !relaxed) {
+            relaxed = true;
+            continue;
+          }
+          if (tail.start === 0 || (!splitGroup && older.length >= limit)) {
+            const slice = older.slice(-limit);
+            const start = slice.length ? slice[0].at : 0;
+            const end = slice.length ? slice[slice.length - 1].at + 1 : 0;
+            return send(200, {
+              items: slice.map((item: any) => item.row),
+              total: tail.total,
+              start,
+              end,
+              // 窗口还没退到文件头，或者裁掉的部分里还有消息，才算「前面还有」
+              hasMore: tail.start > 0 || older.length > slice.length,
+            });
+          }
+          window = Math.min(window * 2, 200000);
+        }
       }
       if (req.method === "GET" && req.url === "/api/status")
         return send(200, {

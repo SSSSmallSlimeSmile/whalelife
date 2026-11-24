@@ -2315,3 +2315,70 @@ dialog::backdrop {
   line-height: 1.5;
   white-space: pre;
 }
+
+/* 对话刻度轨：一屏一格，当前视口高亮，点击跳转 */
+.chat-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.chat-body .messages {
+  flex: 1;
+  min-width: 0;
+}
+.chat-ruler {
+  position: relative;
+  flex: 0 0 18px;
+  width: 18px;
+  margin: 22px 0 22px 6px;
+}
+.chat-ruler[hidden] {
+  display: none;
+}
+.chat-ruler::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+.chat-ruler .tick {
+  position: absolute;
+  left: 0;
+  width: 18px;
+  height: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.chat-ruler .tick::after {
+  content: "";
+  display: block;
+  width: 9px;
+  height: 2px;
+  margin: 2px auto;
+  border-radius: 2px;
+  background: #cfccdb;
+  transition: width 0.15s ease, background 0.15s ease;
+}
+.chat-ruler .tick:hover::after {
+  width: 13px;
+  background: var(--muted);
+}
+.chat-ruler .tick.active::after {
+  width: 14px;
+  background: var(--accent);
+}
+.chat-ruler .tick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-radius: 4px;
+}
+@media (max-width: 640px) {
+  .chat-ruler {
+    display: none;
+  }
+}
