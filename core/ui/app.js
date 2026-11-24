@@ -50,6 +50,14 @@ document
   .querySelectorAll("[data-whale]")
   .forEach((el) => (el.innerHTML = whale));
 
+/** 压成一行纯文本，摘要卡里用。 */
+function plainText(text) {
+  return String(text || "")
+    .replace(/[#*`>]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 class ConsoleApp {
   content = $("content");
   chatWS = null;
@@ -570,6 +578,14 @@ class ConsoleApp {
   renderOutline() {
     const rail = $("chat-rail");
     if (!rail) return;
+    // 轨和消息区必须是两个元素；万一是同一个（DOM 结构变了、id 撞了），
+    // 宁可把轨关掉，也不能擦掉正文——下面清 innerHTML 会把整个消息区清空。
+    if (rail === $("messages")) {
+      rail.hidden = true;
+      this.railTurns = [];
+      this.railStart = null;
+      return;
+    }
     this.railTurns = [];
     let turn = null;
     (this.state.messages || []).forEach((m, index) => {
@@ -1520,6 +1536,7 @@ function messageRows(rows, positions) {
       protocolOriginal: row.tool_protocol_original,
       personaName: row.persona_name,
     }));
+
 }
 
 const app = new ConsoleApp();
