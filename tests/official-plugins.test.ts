@@ -364,7 +364,7 @@ async function isolatedManager(root: string, plugins: unknown[], installedBuilds
   await mkdir(core);
   await mkdir(join(market, "inventories"), { recursive: true });
   for (const file of ["official-plugins.ts", "official-package-files.ts", "instance-directory.ts", "official-package-download.ts",
-    "community-install-receipts.ts", "plugin-replacement-recovery.ts", "package-update-journal.ts", "package-host-range.ts", "plugin-state.ts", "memory.ts"]) {
+    "community-install-receipts.ts", "plugin-replacement-recovery.ts", "package-update-journal.ts", "package-host-range.ts", "plugin-state.ts", "channel-history.ts", "memory.ts"]) {
     await copyFile(new URL("../core/" + file, import.meta.url), join(core, file));
   }
   await writeFile(join(market, "official-releases.json"), JSON.stringify({ plugins, installedBuilds }));

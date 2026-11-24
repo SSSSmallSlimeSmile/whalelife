@@ -467,7 +467,7 @@ class ConsoleApp {
       // 换会话才回到最新一条；同一会话刷新不动位置。
       this.pendingScrollBottom = true;
       this.chatScrolled = false;
-      clearTimeout(this.viewTimer);
+      if (this.viewTimer) clearTimeout(this.viewTimer);
     } else if (savedView?.atBottom) this.pendingScrollBottom = true;
     this.state.session = id;
     this.state.sessions = choices.items;
