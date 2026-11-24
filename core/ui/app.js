@@ -592,7 +592,10 @@ class ConsoleApp {
     const total = this.railTurns.length;
     const size = this.railBatchSize();
     this.railBatch = size;
-    let start = this.railPinned && Number.isFinite(this.railStart) ? Math.round(this.railStart) : total - size;
+    // 手动翻过页就用 railStart 定的那一批；只有「跟随最新」时才强制贴在末尾
+    // （旧写法只认 pinned，翻页里把 pinned 设成 false 之后，一翻就被弹回末尾——勘 2026-11-25 修）
+    let start =
+      this.railPinned || !Number.isFinite(this.railStart) ? total - size : Math.round(this.railStart);
     start = Math.max(0, Math.min(start, Math.max(0, total - 1)));
     if (start + size > total) start = Math.max(0, total - size);
     this.railStart = start;
@@ -612,7 +615,8 @@ class ConsoleApp {
     if (end < total) {
       html +=
         '<button type="button" class="chat-rail-tick chat-rail-page" data-page="next" aria-label="后面还有 ' +
-        (total - end) + ' 轮"><i></i></button>';
+        (total - end) + ' 轮"><i></i></button>' +
+        '<button type="button" class="chat-rail-tick chat-rail-page chat-rail-latest" data-page="latest" aria-label="跳到最新"><i></i></button>';
     }
     rail.innerHTML = html;
     rail.querySelectorAll("[data-turn],[data-page]").forEach((tick) => {
@@ -636,11 +640,25 @@ class ConsoleApp {
     const size = this.railBatch || 48;
     const step = Math.max(1, size - 4);
     const from = Number.isFinite(this.railStart) ? this.railStart : Math.max(0, total - size);
+    if (dir === "latest") {
+      this.railPinned = true;
+      this.railStart = Math.max(0, total - size);
+      this.hideRailCard();
+      this.renderOutline();
+      this.jumpToTurn(total - 1);
+      return;
+    }
+    // 手动翻页就是脱离「跟随最新」。旧写法把 pinned 设成「后面还有没有内容」，
+    // 翻到早期批次后 pinned 仍是 true，下一次滚动就把这一批拽回末尾——看着像导航失灵（勘 2026-11-25 修）。
     const start = dir === "prev" ? from - step : from + step;
+    this.railPinned = false;
     this.railStart = Math.max(0, Math.min(start, Math.max(0, total - size)));
-    this.railPinned = this.railStart + size < total;
     this.hideRailCard();
     this.renderOutline();
+    // 翻完要落到那一批的头一格（往前）或末一格（往后），否则刻度换了、消息停在原处（勘 2026-11-25 修）
+    this.jumpToTurn(
+      dir === "prev" ? this.railStart : Math.min(total - 1, this.railStart + (this.railBatch || 48) - 1),
+    );
   }
   railCard() {
     let card = document.getElementById("chat-rail-card");
@@ -697,9 +715,14 @@ class ConsoleApp {
   jumpToTurn(index) {
     const turn = (this.railTurns || [])[index];
     if (!turn) return;
-    const nodes = $("messages")?.querySelectorAll(".message") || [];
     const target = $("messages")?.querySelector('.message[data-index="' + turn.from + '"]');
-    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (!target) {
+      // 这一轮的消息还没装进页面（分页只装了最近一段），点了不会有反应（勘 2026-11-25 修）
+      if (typeof this.toast === "function")
+        this.toast("这一轮还没加载到页面，先点消息区顶部的「加载更早的」", true);
+      return;
+    }
+    target.scrollIntoView({ block: "start", behavior: "smooth" });
   }
   /** 滚动或窗口尺寸一变就重排：刻度按消息的真实位置摆，紫色只留一个（勘 2026-11-16）。
       旧版一边画按比例插值的游标、一边画按消息判定的高亮，两者位置不一致，
@@ -753,8 +776,11 @@ class ConsoleApp {
       this.renderOutline();
       return;
     }
-    const ticks = [...rail.querySelectorAll(".chat-rail-tick[data-turn]")];
-    if (!ticks.length) return;
+    const turnTicks = [...rail.querySelectorAll(".chat-rail-tick[data-turn]")];
+    if (!turnTicks.length) return;
+    // 翻页格和末端「跳到最新」格没有 top 就会落到静态位置、插到中间去，
+    // 所以整个轨道一起均匀铺开：更早的一批在第一格，「后面的一批」在倒数第二格（勘 2026-11-25 修）。
+    const ticks = [...rail.querySelectorAll(".chat-rail-tick")];
     const boxRect = box.getBoundingClientRect();
     const pad = 12;
     const usable = Math.max(1, rail.clientHeight - pad * 2);
@@ -777,24 +803,33 @@ class ConsoleApp {
       if (rect.top <= head) active = i;
     });
     if (active < 0) return;
-    const first = Number(ticks[0].dataset.turn);
-    const last = Number(ticks[count - 1].dataset.turn);
+    // 手动翻页后用户又滚回最新那条了：重新跟随最新，新消息进来才知道要往末尾走（勘 2026-11-25 修）
+    if (!this.railPinned && active >= turns.length - 1) {
+      this.railPinned = true;
+      this.railStart = Math.max(0, turns.length - (this.railBatch || 48));
+      this.renderOutline();
+      return;
+    }
+    const first = Number(turnTicks[0].dataset.turn);
+    const last = Number(turnTicks[turnTicks.length - 1].dataset.turn);
     if (active < first || active > last) {
       // 手动翻到别的批次时，高亮在批外是正常的：别把批次拽回去，
       // 等用户点「更新」那一格，或者自己滚回这一批里（勘 2026-11-25）。
       // 只有真正由滚动引起的越界才把批次拽回来；刚翻完页那一下不算（勘 2026-11-25）。
-      if (this.railPinned && this.railFromRender) {
-        ticks.forEach((tick) => tick.classList.remove("active"));
+      if (this.railFromRender) {
+        turnTicks.forEach((tick) => tick.classList.remove("active"));
         return;
       }
-      this.railPinned = false;
+      // 高亮跑出本批：跟着它换批（用户滚到更早/更晚的地方），但不再无条件拽回末尾。
+      // 旧写法一越界就把批次重画到 active 附近，翻页后一滚动就跳走（勘 2026-11-25 修）。
       const size = this.railBatch || 48;
       const lo = Math.max(0, active - 2);
       this.railStart = Math.max(0, Math.min(lo, Math.max(0, turns.length - size)));
+      this.railPinned = this.railStart + size >= turns.length;
       this.renderOutline();
       return;
     }
-    ticks.forEach((tick) => tick.classList.toggle("active", Number(tick.dataset.turn) === active));
+    turnTicks.forEach((tick) => tick.classList.toggle("active", Number(tick.dataset.turn) === active));
   }
   async refreshSessionContext() {
     const id = this.state.session;
