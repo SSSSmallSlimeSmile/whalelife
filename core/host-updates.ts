@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { launcherUpgradeNeeded } from "./host-launcher-check.ts";
 import { directoryAt } from "./official-package-files.ts";
-import { latestHostRelease, stageHostRelease, type HostRelease } from "./host-release.ts";
+import { GitHubReleaseQueryError, latestHostRelease, stageHostRelease, type HostRelease } from "./host-release.ts";
 import { hostReleaseDirectory, readHostUpdateState } from "./host-supervisor.ts";
 
 type Result = { status: "updated" | "rolled-back" | "failed"; version: string; message: string; at: string };
@@ -43,7 +43,7 @@ export class HostUpdates {
         this.error = undefined;
       }).catch((error: unknown) => {
         this.release = undefined;
-        this.error = "检查官方发行版本失败：" + errorMessage(error);
+        this.error = error instanceof GitHubReleaseQueryError ? error.message : "检查官方发行版本失败：" + errorMessage(error);
       }).finally(() => { this.checking = undefined; });
       await this.checking;
     }

@@ -64,7 +64,10 @@ test("读取本体状态从不访问发行源，检查失败后仅手动重试",
   const root = await temporaryDirectory("whale-host-manual-");
   let fetched = 0;
   const hostUpdates = new HostUpdates(root, "0.1.0", undefined, async () => {
-    return new Response(null, { status: ++fetched === 1 ? 403 : 404 });
+    fetched++;
+    if (fetched === 1) return new Response(null, { status: 403 });
+    if (fetched === 2) return new Response(null, { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+    return new Response(null, { status: 404 });
   });
   const web = await startWeb({ web: { port: 0 } }, { channels: {}, logger: { info() {} }, hostUpdates }, { root });
   t.after(() => web.close());
@@ -80,12 +83,20 @@ test("读取本体状态从不访问发行源，检查失败后仅手动重试",
   }).then(res => res.json());
   assert.equal((await status()).checked, false);
   assert.equal(fetched, 0);
-  assert.match((await check()).error, /HTTP 403/);
-  assert.match((await status()).error, /HTTP 403/);
+  const forbidden = await check();
+  assert.match(forbidden.error, /^GitHub 拒绝了本次版本查询/);
+  assert.deepEqual(await status(), forbidden);
   assert.equal(fetched, 1);
+  const limited = await check();
+  assert.match(limited.error, /^GitHub 暂时限制了更新查询。请稍后再试/);
+  assert.equal(limited.checked, false);
+  assert.equal(limited.latest, null);
+  assert.deepEqual(await status(), limited);
+  assert.equal(fetched, 2);
   const latest = await check();
   assert.equal(latest.checked, true);
   assert.equal(latest.latest, null);
+  assert.equal(latest.error, undefined);
   assert.deepEqual(await status(), latest);
-  assert.equal(fetched, 2);
+  assert.equal(fetched, 3);
 });

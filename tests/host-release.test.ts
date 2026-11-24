@@ -38,6 +38,22 @@ test("release checks accept only newer official, stable, digest-pinned host asse
   await assert.rejects(latestHostRelease("0.1.0", async () => new Response(null, { status: 503 })), /503/);
 });
 
+test("GitHub release checks distinguish rate limits from other forbidden responses", async t => {
+  const now = Date.parse("2026-11-24T10:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const reset = String(now / 1000 + 3600);
+  const check = (status: number, headers: Record<string, string> = {}, body?: string) =>
+    latestHostRelease("0.1.3", async () => new Response(body, { status, headers }));
+  await assert.rejects(check(403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }), /GitHub 暂时限制了更新查询.*北京时间 .*19:00:00/);
+  await assert.rejects(check(429, { "retry-after": "90", "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }), /北京时间 .*18:01:30/);
+  await assert.rejects(check(403, { "retry-after": "60" }), /北京时间 .*18:01:00/);
+  for (const invalid of ["", "invalid", String(now / 1000 - 1)])
+    await assert.rejects(check(403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": invalid }), /限制了更新查询。请稍后再试/);
+  await assert.rejects(check(403, {}, JSON.stringify({ message: "You have exceeded a secondary rate limit." })), /限制了更新查询。请稍后再试/);
+  await assert.rejects(check(429), /限制了更新查询。请稍后再试/);
+  await assert.rejects(check(403, { "x-ratelimit-remaining": "25", "x-ratelimit-reset": reset }, "Forbidden"), /GitHub 拒绝了本次版本查询/);
+});
+
 test("invalid downloads and an archive outside the program allowlist leave staging empty", async () => {
   const root = await temporaryDirectory("whale-host-release-bad-");
   for (const path of ["plugins/gallery/index.ts", "config/config.json", "core/../config/x", "market/CON"]) {

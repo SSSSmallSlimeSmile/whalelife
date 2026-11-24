@@ -17,6 +17,7 @@ const expandedLimit = 120 * 1024 ** 2;
 const headerLimit = 2 * 1024 ** 2;
 const unzip = promisify(gunzip);
 export interface HostRelease { version: string; url: string; digest: string; size: number }
+export class GitHubReleaseQueryError extends Error {}
 
 export function hostAssetName(version: string) {
   if (!versionPattern.test(version)) throw Error("本体版本号无效");
@@ -48,15 +49,43 @@ async function boundedBytes(response: Response, limit: number) {
   } finally { reader.releaseLock(); }
 }
 
+async function githubAccessMessage(response: Response) {
+  const exhausted = response.headers.get("x-ratelimit-remaining") === "0";
+  const retry = response.headers.get("retry-after") ?? "";
+  const retrySeconds = /^\d{1,10}$/.test(retry) ? Number(retry) : undefined;
+  let limited = response.status === 429 || exhausted || retrySeconds !== undefined;
+  if (limited) {
+    await response.body?.cancel();
+  } else if (response.body) {
+    // GitHub can report a secondary limit only in the JSON message.
+    try {
+      const { message } = JSON.parse((await boundedBytes(response, 16 * 1024)).toString("utf8"));
+      limited = typeof message === "string" && /\brate limit(?:ed|ing)?\b/i.test(message);
+    } catch { /* An unreadable 403 still means access was denied. */ }
+  }
+  const alternative = "也可查看「GitHub 正式发行版」。";
+  if (!limited) return "GitHub 拒绝了本次版本查询（HTTP 403）。请稍后再试，" + alternative;
+  const now = Date.now();
+  const reset = response.headers.get("x-ratelimit-reset") ?? "";
+  const retryAt = retrySeconds !== undefined ? now + retrySeconds * 1000 :
+    exhausted && /^\d{1,10}$/.test(reset) ? Number(reset) * 1000 : 0;
+  const time = retryAt > now ? new Date(retryAt).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }) : "";
+  return "GitHub 暂时限制了更新查询。" + (time ? `请在北京时间 ${time} 后再试，` : "请稍后再试，") + alternative;
+}
+
 /** A missing first Release is normal. An unreachable or malformed release is a check failure. */
 export async function latestHostRelease(current: string, request: typeof fetch = fetch): Promise<HostRelease | null> {
   if (!versionPattern.test(current)) throw Error("当前本体版本号无效");
   const response = await request(endpoint, { redirect: "error", credentials: "omit", referrerPolicy: "no-referrer",
     headers: { Accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(10_000) });
   if (response.status !== 200) {
+    if (response.status === 403 || response.status === 429)
+      throw new GitHubReleaseQueryError(await githubAccessMessage(response));
     await response.body?.cancel();
     if (response.status === 404) return null;
-    throw Error(`检查本体发行版本失败（HTTP ${response.status}）`);
+    throw new GitHubReleaseQueryError(`GitHub 发行服务返回 HTTP ${response.status}，请稍后再试。`);
   }
   const meta = JSON.parse((await boundedBytes(response, headerLimit)).toString("utf8"));
   if (meta?.draft === true || meta?.prerelease === true) return null;
