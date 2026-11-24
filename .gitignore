@@ -34,3 +34,4 @@ plugins/**/data/
 *.key
 *.p12
 *.pfx
+.tmp/

@@ -69,9 +69,9 @@ async function fixture(t: TestContext) {
     const { extensionActiveKey } = await import(new URL("../core/ui/extensions.js", import.meta.url).href);
     const sandbox: any = { api: browserApi, e: escapeHTML, extensionActiveKey,
       localStorage: { whaleSession: legacyId }, location: { hash: "#chat" },
-      document: { getElementById: () => node, querySelectorAll: () => [] },
+      document: { getElementById: () => node, querySelectorAll: () => [], addEventListener() {} },
       window: { addEventListener() {} } };
-    for (const file of ["views", "memory", "personas", "models", "plugin-store", "host-updates"])
+    for (const file of ["views", "memory", "personas", "models", "plugin-store", "host-updates", "rich"])
       Object.assign(sandbox, await import(new URL(`../core/ui/${file}.js`, import.meta.url).href));
     runInNewContext(source, sandbox);
     const ui = sandbox.consoleApp;

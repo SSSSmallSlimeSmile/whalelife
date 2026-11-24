@@ -3,11 +3,12 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { createServer } from "node:http";
-import { clock } from "./time.ts";
+import { clock, timezone } from "./time.ts";
 import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Channels } from "./channels.ts";
+import { TurnInput } from "./turn-input.ts";
 import { conversationRows } from "./channel-history.ts";
 import { PluginWebRegistry } from "./plugin-web.ts";
 import { WebClientDisconnectedError } from "./web-errors.ts";
@@ -44,6 +45,9 @@ export async function startWeb(config: any, services: any, runtime: any) {
   const cacheDiagnostics = new CacheDiagnostics(services.modelConfig, services.executionArchive?.root);
   const lifetime = new AbortController();
   let lastCommunityReviews: ReviewedCommunityEntry[] | undefined;
+  // 本轮输入信箱：本轮还在跑时网页端可以往里塞话，等下一次请求模型前生效。
+  // 按「轮」存，不按会话：两个窗口同时跑同一会话时，A 的补充不会落进 B 的回合。
+  const webInboxes = new Map<string, TurnInput>();
   const reviewedPackages = async () => {
     try {
       lastCommunityReviews = await readPublishedCommunityReviews(lifetime.signal);
@@ -89,6 +93,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
     "styles.css",
     "models.css",
     "app.js",
+    "rich.js",
     "api.js",
     "icons.js",
     "models.js",
@@ -558,9 +563,20 @@ export async function startWeb(config: any, services: any, runtime: any) {
         } finally { res.off("close", cancel); }
       }
       if (req.method === "GET" && req.url?.startsWith("/api/session?")) {
-        const id = new URL(req.url, origin).searchParams.get("id");
+        const params = new URL(req.url, origin).searchParams;
+        const id = params.get("id");
         if (!id) return send(400, { error: "请提供会话 ID" });
-        return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        // 不传分页参数时保持旧契约：最近 100 条的数组，旧调用方照旧能 rows.filter
+        if (!params.has("limit") && !params.has("before"))
+          return send(200, conversationRows(await memory.readSession(id)).slice(-100));
+        const asked = Number(params.get("limit"));
+        const limit =
+          Number.isFinite(asked) && asked > 0
+            ? Math.min(Math.floor(asked), 500)
+            : 40;
+        const cursor = Number(params.get("before"));
+        const before = params.has("before") ? (Number.isFinite(cursor) ? Math.max(0, Math.floor(cursor)) : 0) : undefined;
+        return send(200, await memory.readConversationPage(id, limit, before));
       }
       if (req.method === "GET" && req.url === "/api/status")
         return send(200, {
@@ -642,23 +658,83 @@ export async function startWeb(config: any, services: any, runtime: any) {
     }
     let busy = false;
     ws.on("message", async (raw) => {
+      let data: any;
+      try {
+        data = JSON.parse(raw.toString());
+      } catch {
+        send({ type: "error", error: "请求不是合法 JSON" });
+        return;
+      }
+      // 中途插话：本轮还在跑时并进当前回合，改方向不必等下一轮。
+      // 它插不进已经发出去的那批工具调用，只在下次请求模型前生效。
+      if (data.append) {
+        // 只认发起时那一轮的 id。以前没有就退回「本会话当前轮」，
+        // 结果是另一个窗口排队时它的补充被塞进别人的回合。
+        const turnId = typeof data.turn === "string" && data.turn ? data.turn : "";
+        const text = String(data.text ?? "");
+        const messageId =
+          typeof data.messageId === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(data.messageId)
+            ? data.messageId
+            : "web_" + randomBytes(8).toString("hex");
+        const inbox = turnId ? webInboxes.get(turnId) : undefined;
+        // 没送进去的一律把原文带回去，界面据此恢复草稿——失败要看得见。
+        if (!inbox) {
+          send({ type: "append", status: "closed", messageId, text });
+          return;
+        }
+        // 排队中的轮次还没有落盘通道：收下就等于答应了一件做不到的事。
+        if (inbox.waitingForSession) {
+          send({ type: "append", status: "closed", messageId, text, reason: "queued" });
+          return;
+        }
+        try {
+          const result = await inbox.append({
+            messageId,
+            text,
+            receivedAt: new Date().toISOString(),
+            timezone: timezone(config.timezone),
+          });
+          const entered = result.status === "accepted" || result.status === "duplicate";
+          send({ type: "append", status: result.status, messageId, ...(!entered && { text }) });
+        } catch (error: any) {
+          send({ type: "append", status: "rejected", messageId, text, error: error?.message ?? "补充失败" });
+        }
+        return;
+      }
       if (busy) {
         send({ type: "error", error: "正在回复，请稍候" });
         return;
       }
       busy = true;
       try {
-        const data = JSON.parse(raw.toString());
         if (data.expectedSession !== undefined &&
           (data.session !== data.expectedSession || data.expectedSession !== await sessions.current({}, lifetime.signal)))
           throw Error("当前会话已在其他窗口切换，请刷新后重试");
-        await channels.web(
-          data.session,
-          String(data.text ?? ""),
-          (text: string) => send({ type: "chunk", text }),
-          (context: any) => send({ type: "context", ...context }),
-          typeof data.persona === "string" ? data.persona : undefined,
-        );
+        const typed = String(data.text ?? "");
+        const inbox = new TurnInput({
+          messageId: "web_" + randomBytes(8).toString("hex"),
+          text: typed,
+          receivedAt: new Date().toISOString(),
+          timezone: timezone(config.timezone),
+        }, lifetime.signal);
+        // 被丢弃的那段回复要能从界面上撤掉
+        inbox.setResetHandler(() => send({ type: "reset" }));
+        const turnId = "t_" + randomBytes(8).toString("hex");
+        webInboxes.set(turnId, inbox);
+        send({ type: "started", turn: turnId });
+        try {
+          await channels.web(
+            data.session,
+            typed,
+            (text: string) => send({ type: "chunk", text }),
+            (context: any) => send({ type: "context", ...context }),
+            typeof data.persona === "string" ? data.persona : undefined,
+            inbox,
+          );
+        } finally {
+          inbox.closeInput();
+          webInboxes.delete(turnId);
+        }
         send({ type: "done" });
       } catch (error: any) {
         logger.error("聊天失败", { error });

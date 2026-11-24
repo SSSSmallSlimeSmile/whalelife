@@ -4,6 +4,7 @@
  */
 import { api, escapeHTML as e, availableModels } from "./api.js";
 import { icon, whale } from "./icons.js";
+import { renderRich, detailsState, applyDetailsState, hasVisibleText, avatarLabel } from "./rich.js";
 import { renderModels, bindModels } from "./models.js";
 import { renderPersonas, bindPersonas } from "./personas.js";
 import { renderMemory, bindMemory, loadMemory } from "./memory.js";
@@ -130,7 +131,10 @@ class ConsoleApp {
       const r = drawer.getBoundingClientRect();
       if (event.clientX < r.left || event.clientX >= r.right || event.clientY < r.top || event.clientY >= r.bottom) this.leaveStore(true);
     });
-    window.addEventListener("focus", () => this.syncView());
+    // 切回窗口只做静默同步：核对会话、补漏，不重拉会话也不跳位置
+    window.addEventListener("focus", () => this.syncView({ quiet: true }));
+    // toggle 不冒泡，只能用捕获阶段；用户亲手收起时也要记下来
+    document.addEventListener("toggle", (event) => this.rememberDetails(event), true);
     $("login-form").onsubmit = (event) => {
       event.preventDefault();
       this.login();
@@ -421,17 +425,50 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
-  async syncSession(input) {
+  async syncSession(input, options = {}) {
     if (this.state.chatBusy || (!input && this.sessionChanging)) return;
     const sequence = ++this.sessionSync;
-    const { id } = await api("/api/session/current", input ??
+    // adopt：别的窗口已经切了会话，这里只跟着显示，不再回写服务端，
+    // 否则两个窗口每次聚焦都把对方拽回来。
+    const { id } = options.adopt && input && input.id
+      ? { id: input.id }
+      : await api("/api/session/current", input ??
       (this.sessionReady ? undefined : { legacyId: localStorage.whaleSession }));
-    const [rows, choices] = await Promise.all([
-      api("/api/session?id=" + encodeURIComponent(id)), api("/api/session/list"),
+    // 刷新时按上次读到的条数取回同样多，不然只会拿回最后一页、位置全丢
+    if (id === this.state.session) this.saveChatView();
+    const savedView = this.savedView(id);
+    const want = Math.min(
+      Math.max(savedView ? Number(savedView.count) || 0 : 0, SESSION_PAGE),
+      500,
+    );
+    const pageUrl = `/api/session?id=${encodeURIComponent(id)}&limit=${want}`;
+    const [page, choices] = await Promise.all([
+      api(pageUrl),
+      api("/api/session/list"),
     ]);
+    // Keep the oldest loaded message when a new arrival shifts the latest page.
+    while (id === this.state.session && savedView && page.hasMore && page.start > savedView.start) {
+      if (sequence !== this.sessionSync || this.state.chatBusy) return;
+      const older = await api(pageUrl + "&before=" + page.start);
+      if (!older.items.length || older.start >= page.start) break;
+      const from = older.positions.findIndex(position => position >= savedView.start);
+      if (from < 0) break;
+      page.items = older.items.slice(from).concat(page.items);
+      page.positions = older.positions.slice(from).concat(page.positions);
+      page.start = older.positions[from];
+      page.hasMore = from > 0 || older.hasMore;
+    }
     if (sequence !== this.sessionSync || this.state.chatBusy) return;
     this.sessionReady = true;
-    if (this.state.session !== id) this.state.sessionContext = null;
+    if (this.state.session !== id) {
+      this.state.sessionContext = null;
+      // 换个会话，上一份「查看模型原文」的展开状态就不作数了
+      this.detailsOpen = new Set();
+      // 换会话才回到最新一条；同一会话刷新不动位置。
+      this.pendingScrollBottom = true;
+      this.chatScrolled = false;
+      if (this.viewTimer) clearTimeout(this.viewTimer);
+    } else if (savedView?.atBottom) this.pendingScrollBottom = true;
     this.state.session = id;
     this.state.sessions = choices.items;
     this.state.sessionName = choices.items.find(item => item.id === id)?.name || id;
@@ -441,14 +478,83 @@ class ConsoleApp {
       this.state.memoryLoadedTab = null;
     }
     localStorage.whaleSession = id;
-    this.state.messages = rows
-      .filter((r) => r.type === "message")
-      .map((r) => ({
-        role: r.role,
-        text: r.text,
-        protocolOriginal: r.tool_protocol_original,
-        personaName: r.persona_name,
-      }));
+    this.state.messages = messageRows(page.items, page.positions);
+    this.state.paging = {
+      total: page.total,
+      start: page.start,
+      end: page.end,
+      hasMore: page.hasMore,
+    };
+    // 同一会话刷新：等这一版画出来再照锚点把位置摆回去
+    this.pendingRestore =
+      savedView && !this.pendingScrollBottom && savedView.index < this.state.messages.length
+        ? savedView
+        : null;
+  }
+  // ---- 阅读位置：刷新后要能回到原处 ----
+  chatViewKey(id) {
+    return "whalelife.chatView." + (id || "");
+  }
+  /** 记下屏幕最上面那条消息和它被滚掉了多少。 */
+  saveChatView() {
+    const box = $("messages");
+    const id = this.state.session;
+    if (!box || !id || !this.state.messages.length) return;
+    if (typeof box.querySelectorAll !== "function") return;
+    let index = 0;
+    let mid = "";
+    let offset = 0;
+    const nodes = box.querySelectorAll(".message[data-index]");
+    if (!nodes.length) return;
+    const viewportTop = box.getBoundingClientRect().top;
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom > viewportTop) {
+        index = Number(node.dataset.index) || 0;
+        // 序号会漂：末尾新增一条，序号对得上的其实是另一条消息。
+        // id 是那条消息自己的，翻页、追加都不会变。
+        mid = node.dataset.mid || "";
+        offset = viewportTop - rect.top;
+        break;
+      }
+    }
+    try {
+      localStorage.setItem(
+        this.chatViewKey(id),
+        JSON.stringify({
+          count: this.state.messages.length,
+          index,
+          mid,
+          offset,
+          atBottom: box.scrollHeight - box.scrollTop - box.clientHeight < 80,
+          start: this.state.paging ? this.state.paging.start : 0,
+        }),
+      );
+    } catch {
+      // 存不下就算了，不要因为记住位置这点事打断聊天
+    }
+  }
+  savedView(id) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.chatViewKey(id)) || "null");
+      if (!raw || !Number.isFinite(raw.index) || !Number.isFinite(raw.count)) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+  restoreChatView(box) {
+    const saved = this.pendingRestore;
+    this.pendingRestore = null;
+    if (!saved || !box || typeof box.querySelector !== "function") return;
+    // 先按消息 id 找：这才是「当时屏幕最上面那条」，序号只是兜底。
+    let node = saved.mid && Array.from(box.querySelectorAll(".message[data-index]"))
+      .find(item => item.dataset.mid === saved.mid);
+    if (!node) node = box.querySelector(`.message[data-index="${saved.index}"]`);
+    if (!node) return;
+    const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    this.setScrollTop(box, box.scrollTop + top + (Number(saved.offset) || 0));
+    this.updateRuler();
   }
   async refreshSessionContext() {
     const id = this.state.session;
@@ -465,9 +571,26 @@ class ConsoleApp {
         $("chat-context").textContent = error.message;
     }
   }
-  async syncView() {
+  async syncView(options) {
     if ($("store-drawer").open) return;
     const page = this.state.page;
+    if (options?.quiet === true) {
+      // 切回窗口只刷状态与上下文，不重拉会话：重拉会让人正读着的消息被顶掉。
+      if (!this.authenticated || this.syncing || this.state.chatBusy) return;
+      this.syncing = true;
+      try {
+        await this.refreshStatus();
+        if (page === "chat") {
+          await this.refreshSessionContext();
+          await this.reconcileSession();
+        }
+      } catch (error) {
+        if (error.status === 401) this.requireLogin();
+      } finally {
+        this.syncing = false;
+      }
+      return;
+    }
     if (this.authenticated && (page.startsWith("extension:") || page.startsWith("plugin:")) && !this.syncing) {
       this.syncing = true;
       try {
@@ -496,6 +619,24 @@ class ConsoleApp {
     } finally {
       this.syncing = false;
     }
+  }
+  /**
+   * 切回窗口时和服务端对一下当前会话：别的窗口换过了就跟着换，
+   * 否则这一窗还在往旧会话里发，服务端只会一直拒。
+   */
+  async reconcileSession() {
+    if (!this.state.session || this.state.chatBusy || this.sessionChanging) return;
+    let current = null;
+    try {
+      const value = await api("/api/session/current");
+      current = value && value.id;
+    } catch {
+      return;
+    }
+    if (!current || current === this.state.session) return;
+    await this.syncSession({ id: current }, { adopt: true });
+    if (this.state.page === "chat") this.render();
+    this.toast("其他窗口已切换会话，这里已跟着换过来");
   }
   async reload() {
     const button = $("refresh");
@@ -628,6 +769,53 @@ class ConsoleApp {
         if (this.state.page === "logs") this.renderLogs();
         return;
       }
+      if (data.type === "append") {
+        const entered = data.status === "accepted" || data.status === "duplicate";
+        if (data.status === "accepted") this.toast("已并入本轮");
+        else if (data.status === "duplicate") this.toast("这句已经并进去了");
+        else if (data.status === "full") this.toast("本轮补充已满，这句没进去", true);
+        else if (data.reason === "queued") this.toast("这一轮还在排队，开始回复后可以再补充", true);
+        else if (data.status === "closed") this.toast("本轮未接收这条补充，可以重发", true);
+        else this.toast(data.error || "补充没送进去", true);
+        // 没进去的补充不能留成一条看着已发出的虚线气泡，原文放回输入框。
+        // 按 messageId 找，而不是只看「最后一条待定」——done 可能比这条回执先到。
+        const pending =
+          this.pendingNudge && (!data.messageId || this.pendingNudge.messageId === data.messageId)
+            ? this.pendingNudge
+            : null;
+        if (pending) this.pendingNudge = null;
+        if (!entered) {
+          const nudgeId = data.messageId ? "n_" + data.messageId : pending?.nudgeId;
+          const bubble = nudgeId && this.state.messages.find(message => message.nudgeId === nudgeId);
+          const original = bubble?.text || pending?.text || (typeof data.text === "string" ? data.text : "");
+          if (nudgeId) this.state.messages = this.state.messages.filter((m) => m.nudgeId !== nudgeId);
+          // 原文不能丢：输入框空着就放回去；已经有草稿就排进「未送达」，让用户决定重发还是丢弃
+          if (original) {
+            const box = $("chat-input");
+            if (box && !(box.value || "").trim()) {
+              box.value = original;
+              this.state.chatDraft = original;
+            } else {
+              (this.unsentNudges ||= []).push({ text: original, messageId: data.messageId || "" });
+            }
+          }
+          if (this.state.page === "chat") this.renderMessages();
+        }
+        return;
+      }
+      if (data.type === "started") {
+        // 记住这一轮的 id：两个窗口跑同一会话时，补充要落到自己那一轮上
+        this.turn = typeof data.turn === "string" ? data.turn : null;
+        return;
+      }
+      if (data.type === "reset") {
+        // 服务端把这段回复丢掉了（不会进存档），界面上的也得撤，否则刷新前后不一致
+        if (this.reply) {
+          this.reply.text = "";
+          if (this.state.page === "chat") this.renderMessages();
+        }
+        return;
+      }
       if (data.type === "context") {
         if (data.queued) {
           this.toast("当前会话正在处理其他请求，已排队等待");
@@ -642,7 +830,8 @@ class ConsoleApp {
         return;
       }
       if (data.type === "chunk") {
-        if (!this.reply) {
+        const created = !this.reply;
+        if (created) {
           this.reply = {
             role: "assistant",
             text: "",
@@ -651,8 +840,26 @@ class ConsoleApp {
           this.state.messages.push(this.reply);
         }
         this.reply.text += data.text;
-      } else if (data.type === "done" || data.type === "error") {
+        if (this.state.page === "chat") {
+          if (created) this.renderMessages();
+          else this.updateStreamingReply();
+        }
+        return;
+      }
+      if (data.type === "done" || data.type === "error") {
+        this.turn = null;
+        this.pendingNudge = null;
+        if (data.type === "done") this.pendingSend = null;
         if (data.type === "error") {
+          // 这条没发出去：撤掉乐观上屏的气泡，把原文放回输入框，省得重打一遍
+          const pending = this.pendingSend;
+          this.pendingSend = null;
+          if (pending && this.state.messages[pending.index]?.role === "user")
+            this.state.messages.splice(pending.index, 1);
+          if (pending && !($("chat-input")?.value || "").trim()) {
+            $("chat-input").value = pending.text;
+            this.state.chatDraft = pending.text;
+          }
           this.state.messages.push({ role: "error", text: data.error });
           this.toast(data.error, true);
         }
@@ -728,22 +935,34 @@ class ConsoleApp {
           m.id === (persona?.model || this.state.config.bindings.chat) &&
           m.enabled,
       );
-      button.disabled = this.state.chatBusy || this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
+      // 本轮还在跑时按钮不禁用，改成「补充」：这句话并进当前回合，不另起一轮。
+      button.disabled = this.sessionChanging || !this.state.session || !this.chatConnected || !selected;
       button.innerHTML =
-        (this.state.chatBusy ? "正在回复…" : "发送") + " " + icon("send");
+        (this.state.chatBusy ? "补充" : "发送") + " " + icon("send");
     }
     if ($("new-session")) $("new-session").disabled = this.state.chatBusy || this.sessionChanging;
   }
   sendMessage() {
     const text = ($("chat-input")?.value || "").trim();
-    if (
-      !text ||
-      !this.chatConnected ||
-      this.state.chatBusy ||
-      $("send").disabled
-    )
+    if (!text || !this.chatConnected || $("send").disabled) return;
+    // 本轮还在跑：不排队、不新起一轮，直接并进当前回合让它中途改方向。
+    if (this.state.chatBusy) {
+      // 稳定 ID：同一句重送不会写出两条历史，服务端按它去重。
+      const messageId = "nudge_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      this.chatWS.send(
+        JSON.stringify({ append: true, session: this.state.session, turn: this.turn, text, messageId }),
+      );
+      const nudgeId = "n_" + messageId;
+      this.state.messages.push({ role: "user", text, nudge: true, nudgeId });
+      this.pendingNudge = { text, nudgeId, messageId };
+      this.state.chatDraft = "";
+      $("chat-input").value = "";
+      this.renderMessages();
       return;
+    }
     this.state.messages.push({ role: "user", text });
+    // 记下这一条，服务端没接住时好把原文放回输入框
+    this.pendingSend = { text, index: this.state.messages.length - 1 };
     this.state.chatBusy = true;
     this.state.chatDraft = "";
     this.reply = null;
@@ -775,21 +994,289 @@ class ConsoleApp {
       this.updateChatControls();
     }
   }
-  renderMessages() {
+  /** 「查看模型原文」的展开状态：按「会话:消息身份:第几个 details」记，跨整页重画保留。 */
+  rememberDetails(event) {
+    const details = event && event.target;
+    if (!details || details.tagName !== "DETAILS") return;
+    const node = details.closest ? details.closest(".message[data-index]") : null;
+    if (!node) return;
+    const data = node.dataset || {};
+    const identity = data.detailKey !== undefined ? data.detailKey : data.index === undefined ? undefined : "i" + data.index;
+    if (identity === undefined) return;
+    const list = Array.from(node.querySelectorAll("details"));
+    const offset = list.indexOf(details);
+    if (offset < 0) return;
+    if (!this.detailsOpen) this.detailsOpen = new Set();
+    const key = identity + ":" + offset;
+    if (details.open) this.detailsOpen.add(key);
+    else this.detailsOpen.delete(key);
+  }
+  /** 回复里已经有可见文字，才让它占一个气泡。 */
+  replyVisible() {
+    return hasVisibleText(this.reply && this.reply.text);
+  }
+  renderMessages(options) {
+    const opts = options || {};
     const personaName = this.state.status.personaName || "助手";
     const box = $("messages");
     if (!box) return;
+    // 重画会整块换掉 innerHTML，滚动位置跟着归零。这里先记住：贴底才跟到底，
+    // 否则原地不动——否则定时刷新一次就把正在读的旧消息甩到最新。
+    const prevTop = box.scrollTop;
+    const prevNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const pinBottom = this.takeScrollPin();
+    // 会话前缀进键里：两个会话的第 1 条不会撞同一个键
+    const keyOf = (m, index) => (this.state.session || "-") + ":" + (m.id || "i" + index);
     if (!this.state.messages.length) {
       box.innerHTML = `<div class="chat-empty"><span class="brand-mark">${whale}</span><h3>今天想和${e(personaName)}聊点什么？</h3><p>从一句问候开始，或试试「记下这个」。</p></div>`;
+      this.ensureChatScroll();
       return;
     }
-    box.innerHTML = this.state.messages
-      .map(
-        (m) =>
-          `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}"><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "你" : m.role === "error" ? "!" : e((m.personaName || "助手").slice(0, 1))}</span><div class="bubble">${e(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}</div></div>`,
-      )
-      .join("");
-    box.scrollTop = box.scrollHeight;
+    // 整页重画会换掉 #messages，状态必须存在实例上，不能只读当前这个盒子
+    if (!this.detailsOpen) this.detailsOpen = detailsState(box);
+    const open = this.detailsOpen;
+    const parts = [];
+    this.state.messages.forEach((m, index) => {
+      if (m === this.reply && !this.replyVisible()) return;
+      parts.push(
+        `<div class="message ${m.role === "user" ? "user" : m.role === "error" ? "error" : ""}${m.nudge ? " nudge" : ""}" data-index="${index}" data-mid="${e(String(m.id || index))}" data-detail-key="${e(keyOf(m, index))}"${m === this.reply ? ' data-streaming="1"' : ""}><span class="mini-avatar" title="${e(m.personaName || "助手")}">${m.role === "user" ? "我" : m.role === "error" ? "!" : e(avatarLabel(m.personaName))}</span><div class="bubble">${renderRich(m.text)}${m.protocolOriginal ? `<details><summary>查看模型原文</summary><div>${e(m.protocolOriginal)}</div></details>` : ""}${m.protocolNote ? '<div class="protocol-note">上面是模型把工具调用写进正文，已替换为说明，没有执行任何工具。</div>' : ""}</div></div>`,
+      );
+    });
+    box.innerHTML = parts.join("");
+    applyDetailsState(box, open);
+    if (this.state.chatBusy && !this.replyVisible())
+      box.insertAdjacentHTML(
+        "beforeend",
+        `<div class="message" data-thinking="1"><span class="mini-avatar" title="${e(personaName)}">${e(avatarLabel(personaName))}</span><div class="bubble thinking"><i></i><i></i><i></i><span>思考中 <em class="think-face">${pickThinkingFace()}</em></span></div></div>`,
+      );
+    const stick = opts.anchor === "keep" ? false : pinBottom || prevNearBottom;
+    this.setScrollTop(box, stick ? box.scrollHeight : prevTop);
+    this.ensureChatScroll();
+    if (this.pendingRestore) this.restoreChatView(box);
+    this.renderUnsentNudges();
+  }
+  takeScrollPin() {
+    const pin = this.pendingScrollBottom === true;
+    this.pendingScrollBottom = false;
+    return pin;
+  }
+  /** 设定滚动位置；恢复原位置时不播动画。 */
+  setScrollTop(box, value, behavior) {
+    const max = Math.max(0, (box.scrollHeight || 0) - (box.clientHeight || 0));
+    const top = Math.max(0, Math.min(Number(value) || 0, max));
+    if (behavior === "smooth" && typeof box.scrollTo === "function") {
+      box.scrollTo({ top, behavior: "smooth" });
+      return;
+    }
+    // 恢复原位置时不能带平滑动画，否则会看着它慢慢滑回去。
+    const style = box.style;
+    const previous = style && style.scrollBehavior;
+    if (style) style.scrollBehavior = "auto";
+    box.scrollTop = top;
+    if (style) style.scrollBehavior = previous;
+  }
+  /** 刻度轨与滚动监听只绑一次；页面重绘后元素换了也能重新绑上。 */
+  ensureChatScroll() {
+    const box = $("messages");
+    const rail = $("chat-ruler");
+    if (!box) return;
+    if (rail && rail.dataset && rail.dataset.bound !== "1") {
+      rail.dataset.bound = "1";
+      rail.addEventListener("click", (event) => {
+        const tick = event.target.closest("[data-tick]");
+        const target = $("messages");
+        if (!tick || !target || !this.rulerStep) return;
+        const index = Number(tick.dataset.tick) || 0;
+        this.setScrollTop(target, index * this.rulerStep, "smooth");
+      });
+    }
+    if (box.dataset && box.dataset.scrollBound !== "1") {
+      box.dataset.scrollBound = "1";
+      // 只有真的动手滚过，才允许触顶自动翻页；否则初次加载就会一直往前翻。
+      const wake = () => {
+        if (box === $("messages")) this.chatScrolled = true;
+      };
+      box.addEventListener("wheel", wake, { passive: true });
+      box.addEventListener("touchmove", wake, { passive: true });
+      box.addEventListener("keydown", wake);
+      box.addEventListener(
+        "scroll",
+        () => {
+          if (box !== $("messages")) return;
+          this.updateRuler();
+          // 位置攒一下再写，滚动一次不要连着写几十遍 localStorage
+          if (this.viewTimer) clearTimeout(this.viewTimer);
+          this.viewTimer = setTimeout(() => this.saveChatView(), 400);
+          if (box.scrollTop <= 2 && this.chatScrolled && typeof this.loadOlder === 'function')
+            this.loadOlder();
+        },
+        { passive: true },
+      );
+    }
+    // 排版早晚会变（换页、窗口缩放、刷新后第一次排版），插个观察者补一次刻度。
+    if (box.dataset && box.dataset.resizerBound !== "1" && typeof ResizeObserver === "function") {
+      box.dataset.resizerBound = "1";
+      this.rulerObserver?.disconnect?.();
+      this.rulerObserver = new ResizeObserver(() => this.updateRuler());
+      this.rulerObserver.observe(box);
+    }
+    this.updateRuler();
+  }
+  updateRuler() {
+    const rail = $("chat-ruler");
+    const box = $("messages");
+    if (!rail || !box) return;
+    // 轨和消息区必须是两个元素；万一同一个，宁可把轨关掉，也不能擦掉正文。
+    if (rail === box) {
+      rail.hidden = true;
+      this.rulerStep = 0;
+      this.rulerCount = 0;
+      return;
+    }
+    if (!rail.dataset) return;
+    // 量不到高度（藏着的页签、刚换过的元素）就先不动：
+    // 以前这里把 innerHTML 清空，刷新后刻度轨就整条空着，滚动也恢复不回来。
+    const viewport = box.clientHeight || 0;
+    // 刚刷新时消息区还没排版，量到的是 0：过一帧重量，别把轨留成空的。
+    if (!viewport) {
+      if (!this.rulerRetry) {
+        this.rulerRetry = setTimeout(() => {
+          this.rulerRetry = 0;
+          this.updateRuler();
+        }, 60);
+      }
+      return;
+    }
+    const step = Math.max(Math.round(box.clientHeight * 0.9), 140);
+    const scrollable = box.scrollHeight - box.clientHeight;
+    const count =
+      scrollable < step * 0.6
+        ? 0
+        : Math.min(Math.ceil((scrollable + box.clientHeight) / step), 60);
+    if (!count) {
+      rail.hidden = true;
+      rail.innerHTML = "";
+      this.rulerStep = 0;
+      this.rulerCount = 0;
+      return;
+    }
+    // 换了新的轨元素（换会话、刷新后重排版），哪怕尺寸和上次一模一样，
+    // 新元素里也是空的：只比尺寸会整条空着。所以元素变了就必须重画。
+    if (this.rulerRail !== rail || this.rulerStep !== step || this.rulerCount !== count) {
+      this.rulerRail = rail;
+      this.rulerStep = step;
+      this.rulerCount = count;
+      const height = Math.max(box.clientHeight - 12, count * 6);
+      const parts = [];
+      for (let index = 0; index < count; index += 1) {
+        const ratio = count === 1 ? 0 : index / (count - 1);
+        parts.push(
+          `<button type="button" class="tick" data-tick="${index}" style="top:${(ratio * (height - 6)).toFixed(1)}px" aria-label="第 ${index + 1} 屏，共 ${count} 屏"></button>`,
+        );
+      }
+      rail.innerHTML = parts.join("");
+    }
+    rail.hidden = false;
+    const active = Math.max(
+      0,
+      Math.min(count - 1, Math.round(box.scrollTop / step)),
+    );
+    rail
+      .querySelectorAll(".tick")
+      .forEach((tick, index) => tick.classList.toggle("active", index === active));
+  }
+  /** 滚到顶部时往前翻一页，翻完把阅读位置原样托住。 */
+  async loadOlder() {
+    const box = $("messages");
+    const paging = this.state.paging;
+    if (!box || !paging || !paging.hasMore || this.loadingOlder) return;
+    const id = this.state.session;
+    this.loadingOlder = true;
+    const prevHeight = box.scrollHeight;
+    const prevTop = box.scrollTop;
+    try {
+      const page = await api(
+        `/api/session?id=${encodeURIComponent(id)}&before=${paging.start}` +
+          `&limit=${SESSION_PAGE}`,
+      );
+      if (paging !== this.state.paging || box !== $("messages") || id !== this.state.session) return;
+      this.state.paging = {
+        total: page.total,
+        start: page.start,
+        end: page.end,
+        hasMore: page.hasMore,
+      };
+      const rows = messageRows(page.items, page.positions);
+      if (!rows.length) return;
+      this.state.messages = rows.concat(this.state.messages);
+      this.renderMessages({ anchor: "keep" });
+      this.setScrollTop(box, box.scrollHeight - prevHeight + prevTop);
+    } catch (error) {
+      if (error.status !== 401) this.toast(error.message, true);
+    } finally {
+      this.loadingOlder = false;
+    }
+  }
+  /** 流式分片只重画当前那条回复，旧消息和它们的展开状态都不动。 */
+  updateStreamingReply() {
+    const box = $("messages");
+    if (!box || !this.replyVisible()) return;
+    const bubble = box.querySelector('.message[data-streaming="1"] .bubble');
+    if (!bubble) {
+      this.renderMessages();
+      return;
+    }
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    bubble.innerHTML = renderRich(this.reply.text);
+    box.querySelector('.message[data-thinking="1"]')?.remove();
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+    this.updateRuler();
+  }
+  /** 被拒且没处放的补充排在这里：能重发，也能显式丢掉。不碰输入框里正在写的草稿。 */
+  renderUnsentNudges() {
+    const bar = $("nudge-unsent");
+    // 页面没渲染这一块，或者和消息容器是同一个节点（桩环境里常见），就别碰它，
+    // 否则清空自己就等于把正文一起擦了。
+    if (!bar || bar === $("messages")) return;
+    const list = this.unsentNudges || [];
+    if (!list.length) {
+      bar.hidden = true;
+      bar.innerHTML = "";
+      return;
+    }
+    bar.hidden = false;
+    bar.innerHTML =
+      `<span class="nudge-unsent-label">没送进去 ${list.length} 条</span>` +
+      list
+        .map(
+          (item, index) =>
+            `<span class="nudge-unsent-item" title="${e(item.text)}">${e(item.text.length > 24 ? item.text.slice(0, 24) + "…" : item.text)}` +
+            `<button type="button" class="btn small" data-nudge-resend="${index}">重发</button>` +
+            `<button type="button" class="btn small" data-nudge-drop="${index}">丢弃</button></span>`,
+        )
+        .join("");
+    if (bar.dataset.bound) return;
+    bar.dataset.bound = "1";
+    bar.addEventListener("click", (event) => {
+      const resend = event.target.closest("[data-nudge-resend]");
+      const drop = event.target.closest("[data-nudge-drop]");
+      if (!resend && !drop) return;
+      const index = Number((resend || drop).dataset[resend ? "nudgeResend" : "nudgeDrop"]);
+      const item = (this.unsentNudges || [])[index];
+      if (!item) return;
+      if (drop) {
+        this.unsentNudges.splice(index, 1);
+        this.renderUnsentNudges();
+        return;
+      }
+      this.unsentNudges.splice(index, 1);
+      const box = $("chat-input");
+      if (!box) return;
+      box.value = box.value.trim() ? item.text + "\n" + box.value : item.text;
+      this.state.chatDraft = box.value;
+      this.renderUnsentNudges();
+      box.focus();
+    });
   }
   filteredLogs() {
     return this.state.logs.filter(
@@ -815,5 +1302,23 @@ class ConsoleApp {
       `显示 ${lines.length} / ${this.state.logs.length} 条 · ${this.logConnected ? "实时推送中" : "正在重新连接"}`;
   }
 }
+const thinkingFaces = ["(｡•ᴗ•｡)","(´｡• ᵕ •｡`)","(๑•̀ㅂ•́)و","(￣▽￣)","(＝ω＝)","(っ˘ω˘ς)","(๑´ω`๑)","(・ω・)","(๑•́ ₃ •̀๑)","( ˘ω˘ )","(´▽`)","(･ω･)ﾉ"];
+const pickThinkingFace = () => thinkingFaces[Math.floor(Math.random() * thinkingFaces.length)];
+
+const SESSION_PAGE = 40;
+
+/** 会话行 → 气泡数组；首屏与续页共用一份映射。 */
+function messageRows(rows, positions) {
+  return rows
+    .filter((row) => row.type === "message")
+    .map((row, index) => ({
+      id: row.id || (positions ? "historical-line:" + positions[index] : undefined),
+      role: row.role,
+      text: row.text,
+      protocolOriginal: row.tool_protocol_original,
+      personaName: row.persona_name,
+    }));
+}
+
 const app = new ConsoleApp();
 app.start();
