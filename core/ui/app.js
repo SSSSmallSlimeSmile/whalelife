@@ -571,7 +571,11 @@ class ConsoleApp {
     const rail = $("chat-rail");
     const h = rail && rail.clientHeight ? rail.clientHeight : 0;
     if (h < 80) return 48;
-    return Math.max(8, Math.floor((h - 24) / 10) - 2);
+    let n = Math.max(8, Math.floor((h - 12) / 16) - 2);
+    const shrink = this.railShrink;
+    if (shrink && shrink.h === h) n = Math.min(n, shrink.n);
+    else if (shrink) this.railShrink = null;
+    return n;
   }
   /** 左侧导航轨：一条用户请求一节。轨道上只画刻度，摘要放进悬浮卡（勘 2026-11-16）。
       节数多过一批时，首尾各压成一格翻页入口，中间 n 格是本批；不翻页时末尾停在最新一节（勘 2026-11-25）。 */
@@ -635,6 +639,10 @@ class ConsoleApp {
         '<button type="button" class="chat-rail-tick chat-rail-page chat-rail-latest" data-page="latest" aria-label="跳到最新"><i></i></button>';
     }
     rail.innerHTML = html;
+    // 新刻度没有过渡起点，直接出现会「啪」一下；先摘类再挂回去，重播一次淡入（勘 2026-11-25）。
+    rail.classList.remove("rail-swap");
+    void rail.offsetWidth;
+    rail.classList.add("rail-swap");
     rail.querySelectorAll("[data-turn],[data-page]").forEach((tick) => {
       tick.onmouseenter = () => this.showRailCard(tick);
       tick.onmouseleave = () => this.hideRailCard();
@@ -765,7 +773,7 @@ class ConsoleApp {
     }
     if (!this.railWatched) {
       this.railWatched = true;
-      window.addEventListener("resize", () => this.syncRail(), { passive: true });
+      window.addEventListener("resize", () => this.scheduleRail(), { passive: true });
       // 切窗口回来时，尺寸没变、滚动没变，一个事件都不会来。
       // 上一轮若是趁容器被隐藏时算过一遍，高亮就钉死了，得给个重新对账的机会（勘 2026-11-16 修）。
       window.addEventListener("focus", () => this.syncRail());
@@ -787,6 +795,14 @@ class ConsoleApp {
     }
     this.syncRail();
   }
+  /** 拖窗口会连着来十几次 resize，每来一次就重画整条轨，看着就是一路闪；攒 120ms 再算（勘 2026-11-25）。 */
+  scheduleRail() {
+    if (this.railTimer) clearTimeout(this.railTimer);
+    this.railTimer = setTimeout(() => {
+      this.railTimer = null;
+      this.syncRail();
+    }, 120);
+  }
   syncRail() {
     const rail = $("chat-rail");
     const box = $("messages");
@@ -804,13 +820,22 @@ class ConsoleApp {
     // 所以整个轨道一起均匀铺开：更早的一批在第一格，「后面的一批」在倒数第二格（勘 2026-11-25 修）。
     const ticks = [...rail.querySelectorAll(".chat-rail-tick")];
     const boxRect = box.getBoundingClientRect();
-    const pad = 12;
+    const pad = 6;
     const usable = Math.max(1, rail.clientHeight - pad * 2);
     const count = ticks.length;
     const stepRaw = count > 1 ? usable / (count - 1) : 0;
-    const step = Math.max(6, stepRaw);
+    if (stepRaw > 0 && stepRaw < 6) {
+      const fit = Math.max(4, Math.floor(usable / 6) - 3);
+      const shrink = this.railShrink;
+      if (!shrink || shrink.h !== rail.clientHeight || shrink.n > fit) {
+        this.railShrink = { h: rail.clientHeight, n: fit };
+        this.renderOutline();
+      }
+      return;
+    }
+    const step = stepRaw;
     const total = step * Math.max(0, count - 1);
-    const start = pad + (step > stepRaw ? Math.max(0, (usable - total) / 2) : 0);
+    const start = pad + Math.max(0, (usable - total) / 2);
     ticks.forEach((tick, i) => {
       tick.style.top = Math.round((start + i * step) * 10) / 10 + "px";
     });
