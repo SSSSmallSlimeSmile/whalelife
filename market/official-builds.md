@@ -8,8 +8,8 @@
 
 | 插件 | 版本 | 程序文件数 | 此版验证的必需插件 |
 | --- | --- | ---: | --- |
-| QQ | 0.25.0 | 2925 | — |
-| QQ 空间 | 0.5.2 | 136 | QQ 0.22.0、0.23.0、0.24.0、0.25.0（最低 0.22.0） |
+| QQ | 0.26.0 | 2925 | — |
+| QQ 空间 | 0.5.2 | 136 | QQ 0.22.0、0.23.0、0.24.0、0.25.0、0.26.0（最低 0.22.0） |
 | 自主性 | 0.6.3 | 16 | — |
 | 图库 | 0.1.4 | 382 | — |
 | 网上冲浪 | 0.1.1 | 1239 | — |
@@ -63,7 +63,7 @@ node ./market/tools/cache-official.mjs $pluginId $source
 
 ### QQ 桌面组件
 
-QQ 0.22.0、0.23.0、0.24.0 和 0.25.0 桌面版使用相同的 NapCat 4.18.41 Shell、Framework 和 Frida 17.24.0 原生绑定。维护者可以使用插件作者 v0.19.3 Release 已提供的同版本原包，两项资产的 GitHub 摘要与当前 `engine.lock.json`、`desktop-engine.lock.json` 一致。第三方使用和再分发条件见插件的 `THIRD_PARTY_NOTICES.md` 与 NapCat 原许可证。[Shell 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Shell.Windows.Node.zip) · [Framework 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Framework.zip)
+QQ 0.22.0、0.23.0、0.24.0、0.25.0 和 0.26.0 桌面版使用相同的 NapCat 4.18.41 Shell、Framework 和 Frida 17.24.0 原生绑定。维护者可以使用插件作者 v0.19.3 Release 已提供的同版本原包，两项资产的 GitHub 摘要与当前 `engine.lock.json`、`desktop-engine.lock.json` 一致。第三方使用和再分发条件见插件的 `THIRD_PARTY_NOTICES.md` 与 NapCat 原许可证。[Shell 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Shell.Windows.Node.zip) · [Framework 原包](https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.19.3/NapCat.Framework.zip)
 
 0.23.0 保留了本次桌面构建中的文件换行。QQ 主程序和随包的图库入口均已从对应提交独立编译并逐字节比对。需要相同缓存字节时可直接使用本版商店附件。[QQ v0.23.0](https://github.com/iinukami/whalelife-plugin-qq/releases/tag/v0.23.0)
 
@@ -127,3 +127,7 @@ B 站 0.2.10 同时登记了公开构建和此前手动安装的文件清单。�
 另在宿主提交 `aa433167` 自带的旧商店清单上验证了远端更新检查。图库 0.1.3 正式包可直接升到 0.1.4。`dd04b47` 手装版需要先同步本次宿主商店清单，才能被识别并获得更新。
 
 2026-11-23，在 Windows x64 隔离实例中验证 QQ 0.25.0，最低宿主版本为 0.1.3。宿主 0.1.2 沿用 QQ 0.24.0。宿主 0.1.3 在商店检查、预览并确认更新后，QQ 从 0.24.0 原地升到 0.25.0，QQ 空间 0.5.2 和独立图库继续运行。通过本机模拟的 OneBot 消息和模型回复核对了同一私聊会话的人格切换。升级移除了 QQ 原先固定的人格设置，其他 QQ 配置和五项测试数据均保留。
+
+2026-11-24，在 Windows x64 的宿主 0.1.3 和 0.1.5 隔离实例验证 QQ 0.25.0 → 0.26.0 的商店原地更新。QQ 空间 0.5.2、群聊 0.6.10 和独立图库继续运行，非默认配置、六项样例资料及独立子插件程序保留。宿主 0.1.5 另通过从空缓存连同群聊安装 QQ、先更新 QQ 再安装群聊的路径，并用本机模拟服务验证私聊收发、群列表和成员查询。随包的 `qq/gallery` 文件及归属保留，运行时依宿主能力按条件注册。
+
+QQ 0.26.0 的最低宿主为 0.1.3。使用同一份主程序，在宿主 0.1.3 验证辅助识图，在 0.1.5 验证主模型接收原图和明确拒图时的辅助回退，限流与超时保留原始错误。上述业务检查使用本机模拟的 OneBot 和模型服务。完整包按 Git 原始换行构建，1,766 个桌面运行组件文件与 0.25.0 逐字节相同，NapCat 许可证仅有换行差异，正文一致。

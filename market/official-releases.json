@@ -9,6 +9,48 @@
       "requiredPlugins": [],
       "verifiedReleases": [
         {
+          "version": "0.26.0",
+          "hostRange": "0.1.3",
+          "platform": "win32",
+          "arch": "x64",
+          "dependencies": {},
+          "sourceCommit": "d09aacec84d0f26730740b6c543e2e8786075e8f",
+          "delivery": "github-release",
+          "verification": "market/official-builds.md",
+          "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
+          "assetUrl": "https://github.com/iinukami/whalelife-plugin-qq/releases/download/v0.26.0/qq-0.26.0-win32-x64.wlpkg.gz",
+          "sha256": "def7edddf2d68431865cb16698e04d559ad525e9131262e5c741e5453a73cf04",
+          "fileCount": 2925,
+          "sizeBytes": 235690090,
+          "inventorySha256": "94d0322527f65826c371f48d8eacdcd453c61583d24edcc0e329908c79807d54"
+        },
+        {
+          "version": "0.26.0",
+          "hostRange": "0.1.3",
+          "platform": "win32",
+          "arch": "x64",
+          "dependencies": {},
+          "sourceCommit": "d09aacec84d0f26730740b6c543e2e8786075e8f",
+          "delivery": "inventory",
+          "verification": "market/official-builds.md",
+          "bundledPluginIds": [
+            "qq/gallery"
+          ],
+          "conditionalBundledPluginIds": [
+            "qq/gallery"
+          ],
+          "sha256": "94d0322527f65826c371f48d8eacdcd453c61583d24edcc0e329908c79807d54",
+          "fileCount": 2925,
+          "sizeBytes": 440927,
+          "recognitionOnly": true,
+          "inventoryPath": "market/inventories/94d0322527f65826c371f48d8eacdcd453c61583d24edcc0e329908c79807d54.json"
+        },
+        {
           "version": "0.25.0",
           "hostRange": "0.1.3",
           "platform": "win32",
