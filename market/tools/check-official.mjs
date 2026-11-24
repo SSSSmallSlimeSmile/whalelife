@@ -73,6 +73,8 @@ function checkInventory(digest, preserved = []) {
 
 for (const [index, plugin] of manifest.plugins.entries()) {
   const card = official[index];
+  assert.ok(!Object.hasOwn(plugin, "parentCompatibility") && !Object.hasOwn(card, "parentCompatibility"),
+    plugin.id + ": parentCompatibility 须登记在社区子插件的发行记录中");
   assert.equal(plugin.name, card.name);
   assert.equal(plugin.repository, card.repository);
   assert.deepEqual(plugin.requiredPlugins, Array.from(card.dependencies));
@@ -89,6 +91,7 @@ for (const [index, plugin] of manifest.plugins.entries()) {
   checkDisplayVersion(card, plugin.verifiedReleases);
   const hashes = new Set();
   for (const release of plugin.verifiedReleases) {
+    assert.ok(!Object.hasOwn(release, "parentCompatibility"), plugin.id + ": parentCompatibility 仅用于社区子插件的发行记录");
     for (const key of ["version", "hostRange", "platform", "arch", "verification"]) {
       assert.ok(typeof release[key] === "string" && release[key].trim(), plugin.id + ": missing " + key);
     }

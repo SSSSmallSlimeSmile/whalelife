@@ -17,12 +17,14 @@ export type PackageRelease = {
   assetUrl?: string; sizeBytes?: number; inventorySha256?: string;
   composition?: Pick<Parameters<typeof import("./official-package-composition.ts").ensureComposedOfficialPackage>[1], "packagePart" | "zipPart"> & { name: string; version: string };
   dependencies: Record<string, string>; bundledPluginIds?: string[]; recognitionOnly?: boolean;
+  parentCompatibility?: "minimum";
   conditionalBundledPluginIds?: string[];
 };
 type Release = PackageRelease;
 export type PackageEntry = { id: string; name: string; repository: string; parentId: string | null; requiredPlugins: string[]; preserve?: string[]; verifiedReleases: Release[];
   community?: boolean; readInventory?: (sha256: string) => Promise<Buffer> };
 type Entry = PackageEntry;
+type ReviewedChild = { id: string; repository: string; verifiedReleases?: readonly PackageRelease[] };
 type InstalledBuild = { runtimeId: string; version: string; platform: string; arch: string; sha256: string; sourceCommit: string };
 type Card = { id: string; description: string; installation: string };
 type CommunityPolicy = {
@@ -31,7 +33,7 @@ type CommunityPolicy = {
 };
 type Step = { action: "install" | "enable" | "reuse" | "uninstall" | "update"; id: string; name: string; version: string };
 type Item = { entry: Entry; pathId: string; eligible: Release[]; target?: Release; existing?: Release; installedVersion?: string; installed: boolean; reason: string; enabled: boolean; active: boolean; inventoryUnavailable?: boolean;
-  bundledPluginIds?: string[]; independentPluginIds?: string[]; receiptBundledPluginIds?: string[] };
+  verifiedInstalledHash?: string; bundledPluginIds?: string[]; independentPluginIds?: string[]; receiptBundledPluginIds?: string[] };
 const read = (file: string) => JSON.parse(readFileSync(new URL(file, import.meta.url), "utf8"));
 const registry: { plugins: Entry[]; installedBuilds?: InstalledBuild[] } = read("../market/official-releases.json");
 const cards: Card[] = read("../market/catalog.json").official;
@@ -84,13 +86,15 @@ export class PluginPackages {
   private installedBuilds: InstalledBuild[];
   private cards: Card[];
   private community?: CommunityPolicy;
+  private readonly reviewedChildren: readonly ReviewedChild[];
   constructor(runtime: Runtime, entries = registry.plugins, installedBuilds = registry.installedBuilds ?? [],
-    catalogCards = cards, community?: CommunityPolicy) {
+    catalogCards = cards, community?: CommunityPolicy, reviewedChildren: readonly ReviewedChild[] = []) {
     this.runtime = runtime;
     this.entries = entries;
     this.installedBuilds = installedBuilds;
     this.cards = catalogCards;
     this.community = community;
+    this.reviewedChildren = reviewedChildren;
   }
 
   private async inspect(entry: Entry, updating: boolean, removing: boolean): Promise<Item> {
@@ -166,9 +170,10 @@ export class PluginPackages {
           candidate = {...release, inventorySha256: undefined};
           inspection = await inspectOfficialFiles(runtime.root, spec(item, candidate), removing);
         }
-        // Only a reviewed update operation can provide a reader, and only an already installed
-        // version needs a remote inventory. Store it for confirmation and offline crash recovery.
-        if (!removing && record && entry.readInventory && (candidate === release || inspection.reason === "尚未取得已验证的发行包")) {
+        // A fresh target needs no inventory until confirmation, unless old files are still in the directory.
+        // An approved inventory distinguishes preserved data from program files without downloading the archive.
+        if (!removing && entry.readInventory && (candidate === release || inspection.reason === "尚未取得已验证的发行包") &&
+            (record || (this.community && await directoryAt(runtime.root, ownership.directory)))) {
           try {
             const bytes = await entry.readInventory(ownership.sha256);
             await ensureCachedPackage(runtime.root, {sha256:ownership.sha256, sizeBytes:bytes.length},
@@ -195,9 +200,12 @@ export class PluginPackages {
         item.reason = "";
         break;
       }
-      if (updating && !record && candidate.assetUrl && inspection.reason === "尚未取得已验证的发行包") {
-        // A newer, approved dependency may have no bundled inventory or local archive yet.
-        // Its verified package is acquired before mutation; installOfficialFiles checks the destination then.
+      if (!record && candidate.assetUrl && inspection.reason === "尚未取得已验证的发行包" &&
+          (updating || (this.community && entry.readInventory))) {
+        // The live registry may contain a parent not shipped with this host. Preview only a clean install
+        // destination; confirmation verifies the complete download and rechecks the directory before writing.
+        if (this.community && entry.readInventory && await directoryAt(runtime.root, ownership.directory))
+          throw Error("无法核对已有插件目录，已保留原文件。");
         item.reason = "";
         break;
       }
@@ -205,6 +213,7 @@ export class PluginPackages {
         item.installed = true;
         item.installedVersion = candidate.version;
         item.existing = candidate;
+        item.verifiedInstalledHash = candidate.sha256;
         item.reason = "";
         break;
       } else if (inspection.state === "blocked") item.reason = inspection.reason || "无法确认发行包的程序文件。";
@@ -313,7 +322,9 @@ export class PluginPackages {
             const version = release.dependencies[id];
             if (!version) throw Error("发行清单缺少依赖版本：" + id);
             const rules = requirements.get(dependency) ?? [];
-            rules.push({ version, minimum: !part.entry.community && parentOf(part.pathId) === dependency.pathId });
+            const minimum = parentOf(part.pathId) === dependency.pathId &&
+              (!part.entry.community || release.parentCompatibility === "minimum");
+            rules.push({ version, minimum });
             requirements.set(dependency, rules);
           }
         }
@@ -350,14 +361,20 @@ export class PluginPackages {
       const receipt = stored?.version === record.manifest.version ? stored : undefined;
       const dependent = [...items.values()].find(p => p.pathId === record.id);
       if (!(receipt ? receipt.dependencies.includes(item.pathId) : dependent?.entry.requiredPlugins.includes(item.entry.id))) continue;
-      const releases = dependent?.entry.verifiedReleases.filter(r => r.version === record.manifest.version &&
-        (!receipt || r.sha256 === receipt.sha256) && (r.platform === process.platform || r.platform === "any") &&
+      const official = receipt ? receipt === this.officialReceipts.get(record.id) : dependent && !dependent.entry.community;
+      const source = dependent?.entry ?? this.reviewedChildren.find(child => child.id === record.id);
+      const installedHash = receipt?.sha256 ?? (!official ? dependent?.verifiedInstalledHash : undefined);
+      const sameRepository = !receipt?.repository || receipt.repository === source?.repository;
+      const releases = source?.verifiedReleases?.filter(r => r.version === record.manifest.version && sameRepository &&
+        (!installedHash || r.sha256 === installedHash) && (r.platform === process.platform || r.platform === "any") &&
         (r.arch === process.arch || r.arch === "any")) ?? [];
       const recorded = receipt?.dependencyVersions?.[item.pathId];
       const pins = recorded ? new Set([recorded]) : new Set(releases.map(r => r.dependencies[item.entry.id] ?? r.dependencies[item.pathId]));
-      const official = receipt ? receipt === this.officialReceipts.get(record.id) : dependent && !dependent.entry.community;
-      const minimum = !!official && parentOf(record.id) === item.pathId;
       const [version] = pins;
+      // Old receipts carry a dependency version but no range policy. Only a current review of the same bytes can relax it.
+      const approved = releases.filter(r => compatibleHostFloor(r.hostRange, hostVersion));
+      const minimum = parentOf(record.id) === item.pathId && (!!official || (!!installedHash && approved.length > 0 &&
+        approved.every(r => r.parentCompatibility === "minimum" && r.dependencies[item.pathId] === version)));
       if (pins.size !== 1 || !version || !satisfies(target.version, {version, minimum})) {
         const name = receipt?.name ?? dependent?.entry.name ?? record.id;
         return name + "依赖当前插件，尚未验证它能配合 v" + target.version + " 使用。";
@@ -727,4 +744,8 @@ export class PluginPackages {
   }
 }
 
-export class OfficialPlugins extends PluginPackages {}
+export class OfficialPlugins extends PluginPackages {
+  static forUpdate(runtime: Runtime, entries: Entry[], reviewedChildren: readonly ReviewedChild[]) {
+    return new OfficialPlugins(runtime, entries, registry.installedBuilds, cards, undefined, reviewedChildren);
+  }
+}

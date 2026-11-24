@@ -64,6 +64,7 @@ const readme = [
     "| `fileCount`、`sizeBytes` | 发行文件数与安装包或历史清单的字节数。 |",
     "| `verification` | 构建、校验方法与验收范围。 |",
   ].join("\n"),
+  "社区子插件可以在单个已审核的发行记录中填写 `parentCompatibility: \"minimum\"`。采用这一规则时，`dependencies` 中的直接父插件版本是最低实测版本，其他依赖仍按精确版本匹配。[父插件接口的审核要求](community-packages.md#维护者审核)",
   "社区条目的 `collected` 为首次收录日期（YYYY-MM-DD），`stars` 为原仓库的 GitHub 星标数。确认仓库删除或转为私有后，撤下公开条目，在原投稿 Issue 记录原因及首次收录日期。作者提供新的公开仓库并通过核对后，可按原收录日期恢复。",
   "</details>",
   "<sub>WhaleLife 交流 QQ 群 962935021</sub>",

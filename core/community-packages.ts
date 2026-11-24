@@ -16,7 +16,7 @@ import type { Runtime } from "./runtime.ts";
 
 export type ReviewedCommunityRelease = Pick<PackageRelease,
   "version" | "hostRange" | "platform" | "arch" | "dependencies" | "sha256" | "bundledPluginIds"> & {
-    assetUrl: string; sizeBytes: number;
+    assetUrl: string; sizeBytes: number; parentCompatibility?: "minimum";
   };
 export type ReviewedCommunityEntry = {
   id: string; name: string; repository: string; installation: string; description: string;

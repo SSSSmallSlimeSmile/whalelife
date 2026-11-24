@@ -96,8 +96,8 @@ export class PluginUpdates {
     return { updates: updates.filter(row => row.source === "official") };
   }
 
-  async list(installed: Installed[], recognize: (registry?: Metadata | null) => Promise<Recognition>,
-      officialVersions?: (registry: Metadata, ids: ReadonlySet<string>) => Promise<Map<string,string>>) {
+  async list(installed: Installed[], recognize: (registry: Metadata | null, reviews: ReviewedCommunityEntry[]) => Promise<Recognition>,
+      officialVersions?: (registry: Metadata, ids: ReadonlySet<string>, reviews: ReviewedCommunityEntry[]) => Promise<Map<string,string>>) {
     const check = ++this.lastCheck;
     const local = new Map(installed.filter(p => !p.builtin && parseVersion(p.version)).map(p => [p.id, p]));
     if (!local.size) {
@@ -127,14 +127,20 @@ export class PluginUpdates {
       if (matches.length === 1) target = verifiedTarget(matches[0], installedVersion, this.host, process.platform, process.arch);
       if (target) officialCandidates.push({ id, runtimeId, repository, installedVersion, latestVersion: target.version, url: target.url, source: "official" });
     }
+    // Both sides of a parent/child update must use the same community approvals for this click.
+    const communityRead = [...local.keys()].some(id => !reserved.has(id))
+      ? (this.reviewing ??= readCommunityUpdates(this.signal).finally(() => { this.reviewing = undefined; }))
+          .catch(() => ({reviews: [], incomplete: true}))
+      : undefined;
     const official = async () => {
       if (!officialCandidates.length) return;
       if (officialVersions && !publicPlugins) { incomplete = true; return; }
-      const recognition = await recognize(publicRegistry).catch(() => null);
+      const reviews = (await communityRead)?.reviews ?? [];
+      const recognition = await recognize(publicRegistry, reviews).catch(() => null);
       if (!recognition) { incomplete = true; return; }
       if (recognition.incomplete) incomplete = true;
       const compatible = officialVersions && publicRegistry ? await officialVersions(publicRegistry,
-        new Set(officialCandidates.map(row => row.id))).catch(() => null) : undefined;
+        new Set(officialCandidates.map(row => row.id)), reviews).catch(() => null) : undefined;
       if (compatible === null) { incomplete = true; return; }
       for (const item of officialCandidates) {
         if (compatible) {
@@ -148,11 +154,10 @@ export class PluginUpdates {
       }
     };
     const community = async () => {
-      if (![...local.keys()].some(id => !reserved.has(id))) return;
+      if (!communityRead) return;
       try {
         // Recheck the published approvals on each manual check, including revocations.
-        this.reviewing ??= readCommunityUpdates(this.signal).finally(() => { this.reviewing = undefined; });
-        const result = await this.reviewing;
+        const result = await communityRead;
         incomplete ||= result.incomplete;
         const reviews = result.reviews;
         const candidates = reviews.filter(entry => {

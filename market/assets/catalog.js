@@ -377,7 +377,7 @@ window.WHALELIFE_CATALOG = {
       "version": "0.6.10",
       "name": "QQ 群聊",
       "author": "FelixTaXk",
-      "description": "为 QQ 添加群聊，可按群设置回复方式和人格，管理群友标签、引用消息和群语音。安装需要宿主商店能提供官方 QQ v0.24.0。",
+      "description": "为 QQ 添加群聊，可按群设置回复方式和人格，管理群友标签、引用消息和群语音。",
       "repository": "https://github.com/FelixTaXk/whalelife-community-qq-group",
       "installation": "https://github.com/FelixTaXk/whalelife-community-qq-group/blob/e84f673d2a24ab3e97ef8efabecf8b9c82519995/README.md",
       "feedback": "https://github.com/FelixTaXk/whalelife-community-qq-group/issues",
@@ -395,6 +395,7 @@ window.WHALELIFE_CATALOG = {
           "dependencies": {
             "qq": "0.24.0"
           },
+          "parentCompatibility": "minimum",
           "assetUrl": "https://github.com/FelixTaXk/whalelife-community-qq-group/releases/download/v0.6.10/qq-group-0.6.10-win32-x64.wlpkg.gz",
           "sha256": "4d298a9a1f637ee4c564e5a93afd4258a0e226af6fb27e85fbe4f396277fae5b",
           "sizeBytes": 49302

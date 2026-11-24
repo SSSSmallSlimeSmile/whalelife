@@ -48,7 +48,7 @@ node market/tools/review-community-icon.mjs sample "$url"
 
 3. 核对输出文件列表。工具会过滤插件和子插件的 `data/`、用户配置、隐藏文件和常见凭据文件，遇到私钥内容标记会终止。请从清单中逐项确认只有公开程序、必要依赖与授权材料，检查源码或其他命名的文件内是否嵌入了账号资料。用户安装时无需运行作者机器上的构建步骤。
 4. 在**插件自己的公开 GitHub 仓库**创建 Release 草稿。标签与 `plugin.yaml` 的新版本对应，例如插件 `1.2.0` 使用 `v1.2.0`。把生成的 `.wlpkg.gz` 附到草稿。GitHub 自动生成的源码归档可用于手动安装。
-5. 在发行说明里写出附件名、打包工具输出的 `sizeBytes` 和 `sha256`、适用的 WhaleLife 版本、已测试的操作系统与架构，以及必需插件的完整 ID 和版本。子插件请同时写明父插件及版本，可选集成单独说明。核对附件后发布正式 Release，复制发行页及附件直链，填写主仓对应的投稿或复审表单。建议在作者仓库开启不可变发行版，保护今后发布的标签和附件。[GitHub 不可变发行版说明](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+5. 在发行说明里写出附件名、打包工具输出的 `sizeBytes` 和 `sha256`、适用的 WhaleLife 版本、已测试的操作系统与架构，以及必需插件的完整 ID 和版本。子插件请写明直接父插件及实测版本。申请把父插件版本作为最低要求时，请附上所用公开接口的说明、接口版本及向后兼容约定。可选集成单独说明。核对附件后发布正式 Release，复制发行页及附件直链，填写主仓对应的投稿或复审表单。建议在作者仓库开启不可变发行版，保护今后发布的标签和附件。[GitHub 不可变发行版说明](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
 
 ## 维护者审核
 
@@ -70,9 +70,14 @@ node market/tools/review-community-icon.mjs sample "$url"
    | `platform`、`arch` | 对应 Node 的平台和架构，例如 `win32`、`x64`。该维度确实通用时可填 `any` |
    | `assetUrl` | 同一作者仓库下的 `/releases/download/v1.2.0/<文件名>.wlpkg.gz` 附件直链 |
    | `sizeBytes`、`sha256` | 实际压缩文件的字节数和 64 位小写十六进制摘要 |
-   | `dependencies` | 必需插件完整运行 ID 对应实测精确版本，如 `{"surf":"0.1.1"}`。没有时填 `{}`；条目的 `dependencies` 列表与这些 ID 对应 |
+   | `dependencies` | 必需插件完整运行 ID 对应实测版本，如 `{"surf":"0.1.1"}`。默认精确匹配，没有依赖时填 `{}`。条目的 `dependencies` 列表与这些 ID 对应 |
+   | `parentCompatibility` | 社区子插件的发行记录可选填 `"minimum"`。此时 `dependencies` 中直接父插件的版本是最低实测版本，其他依赖仍精确匹配 |
    | `bundledPluginIds` | 可选，随同该附件安装的子插件完整 ID，例如 `["sample/calendar"]` |
 
 5. 在主仓根目录运行 `node market/tools/generate-catalog.mjs` 生成展示文件，再运行 `node market/tools/generate-catalog.mjs --check` 核对。发布后在控制台回读条目，核对安装版本、依赖提示和作者链接。在本轮审核 Issue 通知作者，公开条目回读成功后关闭该帖。缺件或未通过时在本轮 Issue 说明原因，保持开放以接收资料或修订说明。后续版本由作者另开复审帖。
+
+登记父插件最低版本前，维护者须核对该子包使用的公开接口及其向后兼容约定，并用同一份子包在最低版本和当前已审核父版本实测。在审单里记录父子包版本、摘要和实际调用的接口。父插件改变或移除这类接口时，要在发布前复测受影响的子插件，并相应调整兼容记录。依赖父插件内部实现、缺少兼容约定或尚未完成复测的组合继续登记精确版本。
+
+QQ 群聊 v0.6.10 已分别用官方 QQ v0.24.0 和 v0.25.0 验证群聊接口 `groupApiVersion: "1.0.0"`，所以保留 `dependencies.qq` 为 `"0.24.0"`，并登记 `parentCompatibility: "minimum"`。WhaleLife v0.1.3 的商店仍按原来的精确版本匹配。
 
 每个新版附件都独立审核。即使只修打包内容，也要提高版本号并发布新的 Release。已登记附件如被替换，大小或摘要不匹配会中止安装。新附件审核通过前，商店继续提供先前已审核且兼容的版本。

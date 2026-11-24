@@ -331,6 +331,73 @@ test("pin a dependency's reviewed version; reuse or explicitly enable it and res
   assert.equal(f.runtime.records.has(child.entry.id),false);
 });
 
+test("a community parent floor belongs to its reviewed child release and leaves other dependencies pinned", async t => {
+  const f = await fixture(t);
+  const parent = f.plugin("paint"), newerParent = f.plugin("paint", "1.1.0");
+  const helper = f.plugin("colors"), newerHelper = f.plugin("colors", "1.1.0");
+  const deps = {paint:"1.0.0", colors:"1.0.0"};
+  const child = f.plugin("paint/brush", "1.0.0", {deps});
+  const next = f.plugin("paint/brush", "1.1.0", {deps});
+  const minimum = { ...child.release, parentCompatibility:"minimum" as const };
+  const nextMinimum = { ...next.release, parentCompatibility:"minimum" as const };
+  const parents = {...parent.entry,verifiedReleases:[parent.release, newerParent.release]};
+  const helpers = {...helper.entry,verifiedReleases:[helper.release, newerHelper.release]};
+  const store = (releases: ReviewedCommunityRelease[]) => f.manager([parents,helpers,{...child.entry,verifiedReleases:releases}]);
+  const exact = await row(store([child.release]),child.entry.id);
+  assert.equal(exact.steps.find(s => s.id === "paint")?.version, "1.0.0");
+  const manager = store([minimum]);
+  const fresh = await row(manager,child.entry.id);
+  assert.equal(fresh.steps.find(s => s.id === "paint")?.version, "1.1.0");
+  assert.equal(fresh.steps.find(s => s.id === "colors")?.version, "1.0.0");
+  await manager.apply(fresh);
+  const receipts = JSON.parse(await readFile(join(f.root,"config/community-installs.json"),"utf8"));
+  assert.deepEqual(receipts.installs.find((r: any) => r.id === child.entry.id).dependencyVersions,deps);
+  const strictNext = store([minimum,next.release]);
+  assert.equal((await strictNext.updatePlan(child.entry.id, next.release.version)).planKey,"");
+  const higherFloor = store([minimum,{...nextMinimum,dependencies:{...deps,paint:"1.2.0"}}]);
+  const tooOld = await higherFloor.updatePlan(child.entry.id,next.release.version);
+  assert.equal(tooOld.planKey,"");
+  assert.match(tooOld.reason,/请先升级.*1\.2\.0 或更高版本/);
+  const allowed = store([minimum,nextMinimum]);
+  const plan = await allowed.updatePlan(child.entry.id,next.release.version);
+  assert.equal(plan.action,"update",plan.reason);
+  assert.equal(plan.steps.find(s => s.id === "paint")?.action,"reuse");
+  await allowed.applyUpdate({id:child.entry.id,version:next.release.version,planKey:plan.planKey});
+  assert.equal(f.runtime.records.get(child.entry.id)?.manifest.version,next.release.version);
+  assert.equal((await allowed.updatePlan("colors",newerHelper.release.version)).planKey,"");
+});
+
+test("an uncached online official parent is offered on a clean target and checks remnants using its reviewed inventory", async t => {
+  const f = await fixture(t);
+  const parent = f.plugin("surf","1.0.0",{extra:{"vendor/library.txt":"library"}});
+  const child = f.plugin("surf/wave","1.0.0",{deps:{surf:"1.0.0"}});
+  const inventory = Buffer.from(JSON.stringify({format:1,files:parent.files.map(({path,bytes}) =>
+    ({path,size:bytes.length,sha256:hash(bytes)}))}));
+  let inventoryReads = 0;
+  const entry = {...parent.entry,parentId:null,requiredPlugins:[],preserve:["vendor/local.db"],
+    verifiedReleases:[{...parent.release,platform:process.platform,arch:process.arch,inventorySha256:hash(inventory)}],
+    readInventory:async (sha: string) => { assert.equal(sha,hash(inventory)); inventoryReads++;return inventory; }};
+  const store = new CommunityPackages(f.runtime,[child.entry],[entry]);
+  const fresh = await row(store,child.entry.id);
+  assert.equal(fresh.action,"install",fresh.reason);
+  assert.deepEqual(fresh.steps.map(s=>s.id),["surf","surf/wave"]);
+  assert.equal(inventoryReads,0); assert.deepEqual(f.downloads,[]);
+  const vendor = join(f.root,"plugins/surf/vendor");
+  await mkdir(vendor,{recursive:true});
+  await writeFile(join(vendor,"local.db"),"user data");
+  await writeFile(join(vendor,"unknown.ts"),"custom file");
+  assert.equal((await row(store,child.entry.id)).action,"blocked");
+  assert.equal(await readFile(join(vendor,"unknown.ts"),"utf8"),"custom file");
+  assert.deepEqual(f.downloads,[]);
+  await unlink(join(vendor,"unknown.ts"));
+  const allowed = await row(store,child.entry.id);
+  assert.equal(allowed.action,"install",allowed.reason);
+  assert.ok(inventoryReads > 0);
+  await store.apply(allowed);
+  assert.equal(f.runtime.records.get(child.entry.id)?.status,"active");
+  assert.equal(await readFile(join(vendor,"local.db"),"utf8"),"user data");
+});
+
 test("a reviewed bundled child is activated and identified without taking another plugin's directory", async t => {
   const f = await fixture(t);
   const bundle = f.plugin("studio-tools", "1.0.0", {children:["studio-tools/brush"], manifest:{sub:["brush"]}, extra:{

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { Runtime } from "../core/runtime.ts";
-import { OfficialPlugins } from "../core/official-plugins.ts";
+import { OfficialPlugins, type PackageRelease } from "../core/official-plugins.ts";
 import { officialUpdateEntries } from "../core/official-update-registry.ts";
 import { recordCommunityInstalls } from "../core/community-install-receipts.ts";
 import {beginUpdateDependencies, recoverUpdateDependencies} from "../core/package-update-journal.ts";
@@ -502,6 +502,46 @@ test("host 0.1.1 installs and reuses the 0.1.0 registry's parent without selecti
   assert.deepEqual(reuse.steps.map(s => [s.action, s.version]), [["reuse", "0.23.0"], ["install", "1.0.0"]]);
   await manager.apply(reuse);
   assert.equal(f.runtime.records.get("surf/bilibili")?.status, "active");
+});
+
+test("an official parent upgrade uses the current review of the installed community child, including old receipts", async t => {
+  const f = await fixture(t);
+  await f.apply("surf");
+  const next = await f.createParent("1.1.0");
+  next.entry.verifiedReleases.push(f.packages[0].entry.verifiedReleases[0]);
+  const child = await f.create("wave","surf","export function apply(){}");
+  const id = "surf/wave", dir = join(f.root,"plugins/surf/sub/wave");
+  await mkdir(dir,{recursive:true});
+  for (const file of child.files) await writeFile(join(dir,file.path),file.bytes);
+  await f.runtime.pluginState.setEnabled(id,false);
+  assert.equal((await f.runtime.loadPath(id)).status,"stopped");
+  const release: PackageRelease = {...child.entry.verifiedReleases[0],parentCompatibility:"minimum"};
+  const repository = child.entry.repository;
+  const receipt = {id,name:"Wave",version:release.version,sha256:release.sha256,repository,dependencies:["surf"]};
+  const manager = (reviews: PackageRelease[], repo = repository) =>
+    OfficialPlugins.forUpdate(f.runtime,[next.entry],[{id,repository:repo,verifiedReleases:reviews}]);
+  const plan = (store: OfficialPlugins) => store.updatePlan("surf","1.1.0");
+  await recordCommunityInstalls(f.root,[{...receipt,dependencyVersions:{surf:"1.0.0"}}]);
+  assert.equal((await plan(manager([]))).planKey,"");
+  for (const other of [
+    {...release,parentCompatibility:undefined}, {...release,sha256:"f".repeat(64)}, {...release,version:"1.0.1"},
+    {...release,dependencies:{surf:"0.9.0"}}, {...release,platform:"wrong"}, {...release,hostRange:"99.0.0"}
+  ]) assert.equal((await plan(manager([other]))).planKey,"");
+  assert.equal((await plan(manager([release],"https://github.com/testing/another-fork"))).planKey,"");
+  const store = manager([release]);
+  const beforeWithdrawal = await plan(store);
+  assert.equal(beforeWithdrawal.action,"update");
+  await assert.rejects(manager([]).apply(beforeWithdrawal));
+  assert.equal(f.runtime.records.get("surf")?.manifest.version,"1.0.0");
+  // The earliest receipts named dependencies without saving their versions.
+  await recordCommunityInstalls(f.root,[receipt]);
+  assert.equal((await plan(manager([]))).planKey,"");
+  assert.equal((await store.compatibleUpdateVersions(new Set(["surf"]))).get("surf"),"1.1.0");
+  const allowed = await plan(store);
+  assert.equal(allowed.action,"update",allowed.reason);
+  await store.apply(allowed);
+  assert.equal(f.runtime.records.get("surf")?.manifest.version,"1.1.0");
+  assert.equal(f.runtime.records.get(id)?.status,"stopped");
 });
 
 test("a shared official parent satisfies the child's floor and other consumers' exact pins in either dependency order", async t => {

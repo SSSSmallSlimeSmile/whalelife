@@ -55,7 +55,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
   };
   const hostUpdates: HostUpdates = services.hostUpdates ?? new HostUpdates(runtime.root,
     JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version);
-  async function reviewedUpdateManager(reviews: ReviewedCommunityEntry[], ids: ReadonlySet<string>, registry?: Record<string, any> | null) {
+  async function reviewedManager(reviews: ReviewedCommunityEntry[], ids: ReadonlySet<string>, registry?: Record<string, any> | null) {
     const available = new Map(reviews.map(entry => [entry.id, entry]));
     const visited = new Set<string>();
     function usesOfficial(id: string): boolean {
@@ -69,7 +69,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
       registry ? officialUpdateEntries(registry, undefined, lifetime.signal) : await readOfficialUpdateEntries(lifetime.signal));
   }
   const pluginUpdates = new PluginUpdates(lifetime.signal, async (reviews, ids, registry) =>
-    (await reviewedUpdateManager(reviews, ids, registry)).compatibleUpdateVersions(ids));
+    (await reviewedManager(reviews, ids, registry)).compatibleUpdateVersions(ids));
   let officialRead: ReturnType<typeof official.list> | undefined;
   let lastOfficial: { time: number; result: Awaited<ReturnType<typeof official.list>> } | undefined;
   function officialList(forNotice = false) {
@@ -238,7 +238,10 @@ export async function startWeb(config: any, services: any, runtime: any) {
       }
       if (pathname === "/api/community-plugins" && req.method === "GET") {
         const reviews = await reviewedPackages();
-        return send(200, reviews.length ? await new CommunityPackages(runtime, reviews).list() : { plugins: [] });
+        if (!reviews.length) return send(200, { plugins: [] });
+        const manager = await reviewedManager(reviews, new Set(reviews.map(r => r.id)))
+          .catch(() => new CommunityPackages(runtime, reviews, []));
+        return send(200, await manager.list());
       }
       if (pathname === "/api/community-plugins/apply" && req.method === "POST") {
         if (req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json")
@@ -250,7 +253,7 @@ export async function startWeb(config: any, services: any, runtime: any) {
           return send(400, {error: "请先查看商店提供的安装计划，再确认安装。"});
         // Re-read the maintainer's approvals on confirmation, including revocations and changed packages.
         const reviews = await reviewedPackages();
-        try { return send(200, await new CommunityPackages(runtime, reviews).apply(input)); }
+        try { return send(200, await (await reviewedManager(reviews, new Set([input.id]))).apply(input)); }
         finally { lastOfficial = undefined; }
       }
       if (pathname === "/api/host-update" && req.method === "GET")
@@ -269,10 +272,10 @@ export async function startWeb(config: any, services: any, runtime: any) {
           return send(415, { error: "请使用 JSON 提交操作。" });
         await body(req, 4096);
         let officialUpdates: OfficialPlugins | undefined;
-        const reviewed = (registry: Record<string, any>) =>
-          officialUpdates ??= new OfficialPlugins(runtime, officialUpdateEntries(registry, undefined, lifetime.signal));
-        return send(200, await pluginUpdates.list(runtime.list(), registry => registry ? reviewed(registry).list() : officialList(true),
-          (registry, ids) => reviewed(registry).compatibleUpdateVersions(ids)));
+        const reviewed = (registry: Record<string, any>, reviews: ReviewedCommunityEntry[]) =>
+          officialUpdates ??= OfficialPlugins.forUpdate(runtime, officialUpdateEntries(registry, undefined, lifetime.signal), reviews);
+        return send(200, await pluginUpdates.list(runtime.list(), (registry, reviews) => registry ? reviewed(registry, reviews).list() : officialList(true),
+          (registry, ids, reviews) => reviewed(registry, reviews).compatibleUpdateVersions(ids)));
       }
       if (req.method === "POST" && (pathname === "/api/plugin-updates/preview" || pathname === "/api/plugin-updates/apply")) {
         if (req.headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json")
@@ -294,11 +297,13 @@ export async function startWeb(config: any, services: any, runtime: any) {
             const reviews = await reviewedPackages();
             const owner = reviews.find(r => r.id === notice.id && r.repository === notice.repository);
             if (!owner) return send(409, {error:"社区插件的审核记录或仓库已发生变化，请重新检查更新。"});
-            const packages = await reviewedUpdateManager(reviews, new Set([notice.id]));
+            const packages = await reviewedManager(reviews, new Set([notice.id]));
             return send(200, apply ? await packages.applyUpdate({ id:notice.id, version:notice.latestVersion, planKey:input.planKey })
               : await packages.updatePlan(notice.id, notice.latestVersion));
           }
-          const packages = new OfficialPlugins(runtime, await readOfficialUpdateEntries(lifetime.signal));
+          const hasChild = runtime.list().some((p: {id: string}) => p.id.startsWith(notice.runtimeId + "/"));
+          const reviews = hasChild ? await reviewedPackages().catch(() => []) : [];
+          const packages = OfficialPlugins.forUpdate(runtime, await readOfficialUpdateEntries(lifetime.signal), reviews);
           return send(200, apply ? await packages.apply({ action:"update", id:notice.id, version:notice.latestVersion, planKey:input.planKey })
             : await packages.updatePlan(notice.id, notice.latestVersion));
         } finally { if (apply) lastOfficial = undefined; }

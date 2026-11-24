@@ -62,15 +62,20 @@ function reviewedRelease(value: unknown, id: string, repository: string, require
   if (!record(deps) || Object.keys(deps).length !== required.length ||
       !required.every(key => Object.hasOwn(deps, key) && version(deps[key])))
     return invalid(id, "每项必需插件都要登记已验证的版本");
+  const parentCompatibility = value.parentCompatibility;
+  if (parentCompatibility !== undefined && (parentCompatibility !== "minimum" || !id.includes("/")))
+    return invalid(id, "parentCompatibility 只允许社区子插件为其直接父插件登记 minimum");
   const children = value.bundledPluginIds ?? [];
   if (!idList(children) || children.some(child => !child.startsWith(id + "/")))
     return invalid(id, "包内子插件必须使用归属本插件的完整 ID");
   return { version: value.version, hostRange: value.hostRange, platform: value.platform, arch: value.arch,
     assetUrl: value.assetUrl, sha256: value.sha256, sizeBytes: value.sizeBytes,
-    dependencies: Object.fromEntries(required.map(key => [key, deps[key] as string])), bundledPluginIds: children };
+    dependencies: Object.fromEntries(required.map(key => [key, deps[key] as string])), bundledPluginIds: children,
+    ...(parentCompatibility === "minimum" ? { parentCompatibility } : {}) };
 }
 
 function reviewedEntry(entry: Record<string, unknown>, id: string, primaryIds: ReadonlySet<string>) {
+  if (Object.hasOwn(entry, "parentCompatibility")) return invalid(id, "parentCompatibility 须登记在已审核发行包中");
   if (entry.verifiedReleases === undefined) return;
   if (!validRepository(entry.repository) ||
       typeof entry.name !== "string" || !entry.name.trim() || typeof entry.installation !== "string" ||

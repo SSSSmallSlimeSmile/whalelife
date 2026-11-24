@@ -25,7 +25,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 提示音 | v0.3.0 | SSSSmallSlimeSmile | 回复写入记录后在本机播放提示音，可按回合时长和渠道筛选。 | — | [安装说明](<https://github.com/SSSSmallSlimeSmile/whalelife-plugin-chime/blob/8edb052191e00831b72700e9bb59f7746e19d0d3/README.md#%E6%80%8E%E4%B9%88%E8%A3%85>) · [原仓库 · 加星](<https://github.com/SSSSmallSlimeSmile/whalelife-plugin-chime>) · [反馈](<https://github.com/SSSSmallSlimeSmile/whalelife-plugin-chime/issues>) |
 | Discord 文字聊天 | v0.5.1 | Tawake1 | 让鲸鲸在 Discord 私信、频道和讨论串中聊天，支持引用回复、绑定网页会话、频道暂停和可选图片识别。 | — | [安装说明](<https://github.com/Tawake1/whalelife-plugin-discord/blob/db5c118c219fbd56ed8953b102ecbabaf634294a/README.md#%E5%AE%89%E8%A3%85>) · [原仓库 · 加星](<https://github.com/Tawake1/whalelife-plugin-discord>) · [反馈](<https://github.com/Tawake1/whalelife-plugin-discord/issues>) |
-| QQ 群聊 | v0.6.10 | FelixTaXk | 为 QQ 添加群聊，可按群设置回复方式和人格，管理群友标签、引用消息和群语音。安装需要宿主商店能提供官方 QQ v0.24.0。 | QQ | [安装说明](<https://github.com/FelixTaXk/whalelife-community-qq-group/blob/e84f673d2a24ab3e97ef8efabecf8b9c82519995/README.md>) · [原仓库 · 加星](<https://github.com/FelixTaXk/whalelife-community-qq-group>) · [反馈](<https://github.com/FelixTaXk/whalelife-community-qq-group/issues>) |
+| QQ 群聊 | v0.6.10 | FelixTaXk | 为 QQ 添加群聊，可按群设置回复方式和人格，管理群友标签、引用消息和群语音。 | QQ | [安装说明](<https://github.com/FelixTaXk/whalelife-community-qq-group/blob/e84f673d2a24ab3e97ef8efabecf8b9c82519995/README.md>) · [原仓库 · 加星](<https://github.com/FelixTaXk/whalelife-community-qq-group>) · [反馈](<https://github.com/FelixTaXk/whalelife-community-qq-group/issues>) |
 | 抖音 | v0.4.10 | FelixTaXk | 在「网上冲浪」里浏览抖音推荐、搜索视频、观看片段、阅读评论并参与互动。 | 网上冲浪 | [安装说明](<https://github.com/FelixTaXk/whalelife-community-douyin/blob/4ab745585847558bdfc04cd62d195e617d993c1c/README.md#%E8%A3%85%E5%9C%A8%E5%93%AA>) · [原仓库 · 加星](<https://github.com/FelixTaXk/whalelife-community-douyin>) · [反馈](<https://github.com/FelixTaXk/whalelife-community-douyin/issues>) |
 | 日程 | v0.8.2 | FelixTaXk | 按作息、节假日、调休和旅行安排生成每日日程，可在控制台编辑和保存。安装包包含天气和衣柜。聊天时逐轮注入日程需要宿主提供 context 服务。 | — | [安装说明](<https://github.com/FelixTaXk/whalelife-community-schedule/blob/main/README.md#%E6%89%8B%E5%8A%A8%E5%AE%89%E8%A3%85>) · [原仓库 · 加星](<https://github.com/FelixTaXk/whalelife-community-schedule>) · [反馈](<https://github.com/FelixTaXk/whalelife-community-schedule/issues>) |
 | 画室 | v0.2.15 | FelixTaXk | 用本地 ComfyUI、SD-WebUI 或兼容接口生成图片，附带视频和提示词小抄。看图与绘制蒙版需 Python 和 Pillow。 | — | [安装说明](<https://github.com/FelixTaXk/whalelife-community-studio/blob/main/README.md#%E6%89%8B%E5%8A%A8%E5%AE%89%E8%A3%85>) · [原仓库 · 加星](<https://github.com/FelixTaXk/whalelife-community-studio>) · [反馈](<https://github.com/FelixTaXk/whalelife-community-studio/issues>) |
@@ -53,6 +53,8 @@
 | `delivery`、`recognitionOnly` | 本机构建见 `local-build`；`recognitionOnly` 条目以历史程序清单的 SHA-256 识别手装版本。 |
 | `fileCount`、`sizeBytes` | 发行文件数与安装包或历史清单的字节数。 |
 | `verification` | 构建、校验方法与验收范围。 |
+
+社区子插件可以在单个已审核的发行记录中填写 `parentCompatibility: "minimum"`。采用这一规则时，`dependencies` 中的直接父插件版本是最低实测版本，其他依赖仍按精确版本匹配。[父插件接口的审核要求](community-packages.md#维护者审核)
 
 社区条目的 `collected` 为首次收录日期（YYYY-MM-DD），`stars` 为原仓库的 GitHub 星标数。确认仓库删除或转为私有后，撤下公开条目，在原投稿 Issue 记录原因及首次收录日期。作者提供新的公开仓库并通过核对后，可按原收录日期恢复。
 

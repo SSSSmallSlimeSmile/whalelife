@@ -27,6 +27,25 @@ test("收录与逐包审核独立；发行记录只能引用原仓库、已审�
   assert.throws(() => parse({...item, verifiedReleases:[release, {...release,hostRange:">=0.1.0"}]}), /匹配重复/);
 });
 
+test("父插件最低兼容版本只接受发行记录内直接父插件的明确声明", () => {
+  const dependencyVersions = { "parent/child":"1.2.0", helper:"0.3.0" };
+  const child = {...item, id:"parent/child/sample", dependencies:Object.keys(dependencyVersions)};
+  const plain = {...release, dependencies:dependencyVersions};
+  const parse = (entry: object) => reviewedCommunityEntries({official:[], community:[entry]});
+  const reviewed = (row: object) => parse({...child, verifiedReleases:[row]})[0].verifiedReleases![0];
+  assert.ok(!Object.hasOwn(reviewed(plain), "parentCompatibility"));
+  const matched = reviewed({...plain, parentCompatibility:"minimum"});
+  assert.equal(matched.parentCompatibility, "minimum");
+  assert.deepEqual(matched.dependencies, dependencyVersions);
+  for (const invalid of [null, true, "exact", ">=1.2.0", ["minimum"]])
+    assert.throws(() => reviewed({...plain, parentCompatibility:invalid}), /parentCompatibility/);
+  assert.throws(() => parse({...item, verifiedReleases:[{...release,parentCompatibility:"minimum"}]}), /parentCompatibility/);
+  assert.throws(() => parse({...child, dependencies:["parent"], verifiedReleases:[
+    {...release, parentCompatibility:"minimum", dependencies:{parent:"1.2.0"}},
+  ]}), /直接父插件/);
+  assert.throws(() => parse({...child, parentCompatibility:"minimum", verifiedReleases:[plain]}), /发行包/);
+});
+
 test("同一子插件不能同时由独立条目与另一发行包管理", () => {
   assert.throws(() => reviewedCommunityEntries({official:[], community:[
     {...item, verifiedReleases:[{...release, bundledPluginIds:["sample/child"]}]},

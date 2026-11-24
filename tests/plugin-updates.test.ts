@@ -109,6 +109,31 @@ test("a fresh instance makes no public requests and unlisted installations do no
   assert.deepEqual(requests.map(r => r.address), [catalogURL]);
 });
 
+test("a manual parent update check passes the same current child approval to recognition and planning", async t => {
+  const id = "parent/child/addon";
+  const addon = { ...card(id), repository: github + "addon", dependencies: ["parent/child"] };
+  const release = { ...review(addon, "1.0.0", {"parent/child":"1.0.0"}), parentCompatibility:"minimum" };
+  const responses = new Map<string, unknown>([[registryURL, registry],
+    [catalogURL, {official:[],community:[{...addon,verifiedReleases:[release]}]}]]);
+  const requests = serve(t, responses);
+  const plugins = [installed[0], {id,version:"1.0.0"}];
+  const service = make(plugins);
+  for (const current of [true,false]) {
+    if (!current) responses.set(catalogURL,{official:[],community:[]});
+    const expected = current ? ["minimum"] : [];
+    const result = await service.list(plugins, async (_registry, reviews) => {
+      assert.deepEqual(reviews.map(entry => entry.verifiedReleases?.[0].parentCompatibility), expected);
+      return recognized();
+    }, async (_registry, _ids, reviews) => {
+      assert.deepEqual(reviews.map(entry => entry.verifiedReleases?.[0].parentCompatibility), expected);
+      return current ? new Map([["child","1.1.0"]]) : new Map();
+    });
+    assert.ok(!result.incomplete);
+    assert.equal(result.updates.length, Number(current));
+  }
+  assert.equal(requests.filter(r => r.address === catalogURL).length,2);
+});
+
 test("reading the last manual result is local, and notices disappear for removed or replaced installations", async t => {
   const calls = serve(t, new Map<string, unknown>([[catalogURL, catalog], [registryURL, registry]]));
   const service = make();
