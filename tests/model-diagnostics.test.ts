@@ -40,8 +40,34 @@ async function fixture(t: TestContext, enabled = true) {
       (await readFile(join(directory, file), "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line))))).flat();
     return rows.sort((a, b) => a.sequence - b.sequence);
   };
-  return { diagnostics, llm, events };
+  return { diagnostics, llm, events, directory };
 }
+
+test("private channel image requests retain usage but never archive the image, vendor echoes or attachments", async t => {
+  const f = await fixture(t);
+  const bytes = Buffer.from("synthetic channel image payload");
+  const encoded = bytes.toString("base64"), url = "data:image/png;base64," + encoded;
+  const usage = { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14, prompt_tokens_details: { cached_tokens: 8 } };
+  const options = { provider, privateChannelImages: true, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url } }] }] };
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+    assert.ok(typeof init?.body === "string" && init.body.includes(encoded));
+    if (++requests === 1) return stream([{ choices: [{ delta: { content: "ok" } }], usage: { ...usage, vendor_echo: url } }, "[DONE]"]);
+    return Response.json({ error: { message: "Image input is not supported", echo: encoded } }, { status: 400, headers: { "x-echo": encoded } });
+  });
+  assert.deepEqual((await f.llm.chat(options)).usage, usage);
+  await assert.rejects(f.llm.chat(options), /不支持图片输入/);
+  const events = await f.events();
+  assert.equal(kinds(events, "request.start").length, 2);
+  assert.equal(kinds(events, "request.end").length, 2);
+  assert.deepEqual(kinds(events, "request.usage").at(-1).data.usage, usage);
+  assert.ok(!JSON.stringify(events).includes(encoded));
+  const files = await readdir(join(f.directory, "attachments")).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  assert.deepEqual(files, []);
+});
 
 test("diagnostics on and off preserve the exact request, transport count and return value", async t => {
   const disabled = await fixture(t, false), enabled = await fixture(t);

@@ -11,7 +11,8 @@ import { validateOrigin, type Origin } from "./provenance.ts";
 import type { ToolTurn } from "./tool-retention.ts";
 import { TurnInput } from "./turn-input.ts";
 import { outgoingMessage } from "./channel-history.ts";
-import type { ChannelTurn, IncomingMessageData, SenderProfile, TurnAppendResult } from "./plugin-api.ts";
+import type { ChannelAdapter as PublicChannelAdapter, ChannelImage, ChannelTurn, IncomingMessageData, SenderProfile, TurnAppendResult } from "./plugin-api.ts";
+import { channelImageFingerprint, containsAttachedImageBytes, snapshotChannelImages, withPrivateChannelImages } from "./channel-images.ts";
 import { normalizeSenderProfile } from "./sender-profile.ts";
 import { channelFailureReason } from "./channel-errors.ts";
 
@@ -22,6 +23,8 @@ export type ChannelRoute = {
   sender?: string;
   senderProfile?: SenderProfile;
   messageId?: string;
+  images?: ChannelImage[];
+  describeImages?: (messageId: string, images: ChannelImage[], signal: AbortSignal) => Promise<string>;
   persona: string;
   permission: Permission;
   signal?: AbortSignal;
@@ -48,6 +51,7 @@ export type ChannelAdapter = {
   persona?: string;
   personaMode?: "active";
   permission?: Permission;
+  describeImages?: PublicChannelAdapter["describeImages"];
   send(message: OutgoingMessage, options: { signal: AbortSignal }): Promise<void>;
 };
 export type ChannelResult = {
@@ -70,6 +74,7 @@ export type RebindOptions = {
 };
 export interface ChannelHandle {
   readonly supportsSenderProfile?: true;
+  readonly supportsImageInput?: true;
   currentPersona?(): string;
   receive(message: IncomingMessage, options?: ReceiveOptions): Promise<ChannelResult>;
   openTurn?(message: IncomingMessage, options?: ReceiveOptions): Promise<ChannelTurn>;
@@ -134,10 +139,15 @@ function identifier(value: unknown, label: string) {
     throw Error(label + " 无效（1–200 字，不能含控制字符）");
   return value;
 }
-function messageText(value: unknown) {
-  if (typeof value !== "string" || !value.trim() || value.length > 16000)
+function messageText(value: unknown, images?: ChannelImage[]) {
+  if (typeof value !== "string" || (!value.trim() && !images?.length) || value.length > 16000)
     throw Error("消息必须为 1–16000 字纯文本");
+  if (images?.length && containsAttachedImageBytes(value, images))
+    throw Error("渠道入站正文不能包含所附图片的原始编码");
   return value;
+}
+function inputFingerprint(sender: string | undefined, text: string, images?: ChannelImage[]) {
+  return images?.length ? hash([sender, text, channelImageFingerprint(images)]) : hash([sender, text]);
 }
 
 /** Text transport boundary. All model, tool, history and token handling stays in Sessions. */
@@ -182,10 +192,27 @@ export class Channels {
     return { persona, permission: permission as Permission };
   }
   private route(reg: Registration, peer: string, message?: IncomingMessage, signal?: AbortSignal): ChannelRoute {
+    const describe = reg.adapter.describeImages;
     return {
       channel: reg.adapter.id, account: reg.adapter.account, peer,
       sender: message?.sender, messageId: message?.messageId,
       ...(message?.senderProfile && { senderProfile: message.senderProfile }),
+      ...(message?.images?.length && { images: message.images }),
+      ...(message && describe && { describeImages: async (messageId: string, images: ChannelImage[], signal: AbortSignal) => {
+        this.alive(reg, signal);
+        let onAbort!: () => void;
+        const cancelled = new Promise<never>((_, reject) => {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+          const response = Promise.resolve().then(() => {
+            signal.throwIfAborted();
+            return withPrivateChannelImages(() => describe.call(reg.adapter, { peer, messageId, images: snapshotChannelImages(images) }, { signal }), images);
+          });
+          return await Promise.race([response, cancelled]);
+        } finally { signal.removeEventListener("abort", onAbort); }
+      } }),
       origin: { plugin: reg.owner, channel: reg.adapter.id, platform: reg.adapter.name ?? reg.adapter.id },
       ...this.policy(reg.adapter), signal,
     };
@@ -441,11 +468,12 @@ export class Channels {
   private incoming(reg: Registration, input: IncomingMessage | SendMessage, options: ReceiveOptions, direction: "in" | "out") {
     this.alive(reg, options.signal);
     this.validateInput(input);
-    const peer = identifier(input.peer, "peer"), messageId = identifier(input.messageId, "messageId"), text = messageText(input.text);
+    const images = direction === "in" ? snapshotChannelImages((input as IncomingMessage).images) : undefined;
+    const peer = identifier(input.peer, "peer"), messageId = identifier(input.messageId, "messageId"), text = messageText(input.text, images);
     const sender = direction === "in" ? identifier((input as IncomingMessage).sender, "sender") : undefined;
     const senderProfile = direction === "in" ? normalizeSenderProfile((input as IncomingMessage).senderProfile) : undefined;
-    const message = { peer, sender: sender ?? reg.adapter.account, senderProfile, messageId, text };
-    const fingerprint = hash([sender, text]);
+    const message = { peer, sender: sender ?? reg.adapter.account, senderProfile, messageId, text, images };
+    const fingerprint = inputFingerprint(sender, text, images);
     const signal = AbortSignal.any([reg.controller.signal, ...(options.signal ? [options.signal] : [])]);
     const route = this.sessions.captureRoute(peer, this.route(reg, peer, message, signal));
     return this.single(reg, peer, messageId, direction, fingerprint, () => this.operation(reg, signal, () => this.lease(reg, peer, async () => {
@@ -478,7 +506,8 @@ export class Channels {
         try {
           response = await generate!(text);
         } catch (error: any) {
-          receipt = { ...receipt, status: "generation_failed", error: turn?.transient ? "临时资料处理失败，原始错误未保存" : error.message,
+          receipt = { ...receipt, status: "generation_failed", error: turn?.transient ? "临时资料处理失败，原始错误未保存"
+            : images?.length ? channelFailureReason(error, this.sessions.services.logger?.secrets) : error.message,
             ...(turn?.transient ? { transient: true } : {}) };
           await this.save(id, route, receipt);
           return this.result(id, receipt);
@@ -500,15 +529,17 @@ export class Channels {
   }
   private turnMessage(input: IncomingMessage): IncomingMessage {
     this.validateInput(input);
+    const images = snapshotChannelImages(input.images);
     return { peer: identifier(input.peer, "peer"), sender: identifier(input.sender, "sender"),
-      senderProfile: normalizeSenderProfile(input.senderProfile), messageId: identifier(input.messageId, "messageId"), text: messageText(input.text) };
+      senderProfile: normalizeSenderProfile(input.senderProfile), messageId: identifier(input.messageId, "messageId"),
+      text: messageText(input.text, images), ...(images.length > 0 && { images }) };
   }
   /** Explicit input group. Admission is separate from waiting for its final delivery. */
   private openTurn(reg: Registration, input: IncomingMessage, options: ReceiveOptions): Promise<ChannelTurn> {
     this.alive(reg, options.signal);
     const message = this.turnMessage(input);
     const key = this.key(reg, message.peer), groupKey = hash([key, message.messageId, "in"]);
-    const fingerprint = hash([message.sender, message.text]);
+    const fingerprint = inputFingerprint(message.sender, message.text, message.images);
     const groups = this.inputTurns.get(reg) ?? new Map<string, { fingerprint: string; promise: Promise<ChannelTurn> }>();
     this.inputTurns.set(reg, groups);
     const existing = groups.get(groupKey);
@@ -522,6 +553,7 @@ export class Channels {
     const sourceSignals = [reg.controller.signal, failure.signal, ...(options.signal ? [options.signal] : [])];
     const signal = AbortSignal.any(sourceSignals);
     const route = this.sessions.captureRoute(message.peer, this.route(reg, message.peer, message, signal));
+    delete message.images;
     const checkMember = (value: IncomingMessage) => {
       const next = this.turnMessage(value);
       if (next.peer !== message.peer || next.sender !== message.sender) throw Error("追加输入必须来自同一渠道对象和发送者");
@@ -534,7 +566,7 @@ export class Channels {
         if (signal.aborted) return { status: "cancelled", messageId: next.messageId };
         this.alive(reg);
         const previous = await this.receipt(key, next.messageId, "in");
-        if (previous && previous.receipt.fingerprint !== hash([next.sender, next.text])) throw Error("相同消息 ID 的内容不一致");
+        if (previous && previous.receipt.fingerprint !== inputFingerprint(next.sender, next.text, next.images)) throw Error("相同消息 ID 的内容不一致");
         const same = next.messageId === message.messageId || (saved.receipt.group_id && saved.receipt.group_id === previous?.receipt.group_id);
         return { status: previous && same ? "duplicate" : "closed", messageId: next.messageId };
       },
@@ -561,7 +593,7 @@ export class Channels {
           if (reserved.receipt.fingerprint !== fingerprint) throw Error("相同消息 ID 的内容不一致");
           return closed(reserved);
         }
-        const inbox = new TurnInput({ messageId: message.messageId, text: message.text, senderProfile: message.senderProfile,
+        const inbox = new TurnInput({ messageId: message.messageId, text: message.text, images: route.images, senderProfile: message.senderProfile,
           receivedAt: route.receivedAt!, timezone: route.timezone! }, route.signal!);
         let toolTurn: ToolTurn | undefined;
         let failureStage = "等待执行阶段";
@@ -587,7 +619,7 @@ export class Channels {
             catch { receipt = { ...receipt, status: "uncertain", error: "执行或回执记录中断；已发生动作待核对，不会自动重放" }; }
             return this.result(id, receipt);
           }))))).finally(() => {
-            inbox.closeInput(); sourceSignals.length = 0;
+            inbox.closeInput(); inbox.releaseImages(); delete route.images; sourceSignals.length = 0;
             groups.delete(groupKey);
             if (!groups.size) this.inputTurns.delete(reg);
           });
@@ -601,17 +633,18 @@ export class Channels {
             if (reg.adapter.personaMode === "active" && this.policy(reg.adapter).persona !== route.persona)
               inbox.closeInput();
             const arrival = new Date().toISOString();
-            return inbox.append({ messageId: next.messageId, text: next.text, senderProfile: next.senderProfile, receivedAt: arrival, timezone: route.timezone! }, async () => {
+            const fingerprint = inputFingerprint(next.sender, next.text, next.images);
+            return inbox.append({ messageId: next.messageId, text: next.text, images: next.images, senderProfile: next.senderProfile, receivedAt: arrival, timezone: route.timezone! }, async () => {
               this.alive(reg, route.signal);
               let previous: StoredReceipt | undefined;
               try { previous = await this.receipt(key, next.messageId, "in"); }
               catch (error) { failure.abort(Error("追加输入回执读取失败")); throw error; }
               if (previous) {
-                if (previous.receipt.fingerprint !== hash([next.sender, next.text])) throw Error("相同消息 ID 的内容不一致");
+                if (previous.receipt.fingerprint !== fingerprint) throw Error("相同消息 ID 的内容不一致");
                 throw Error("此消息已经属于其他轮次，不能再次加入当前轮");
               }
               const member: Receipt = { type: "channel_receipt", channel_key: key, external_message_id: next.messageId, direction: "in",
-                fingerprint: hash([next.sender, next.text]), delivery_id: receipt.delivery_id, status: "pending", group_id: groupId,
+                fingerprint, delivery_id: receipt.delivery_id, status: "pending", group_id: groupId,
                 group_message_id: message.messageId, input_text: next.text, input_sender: next.sender,
                 ...(receipt.persona_id && { persona_id: receipt.persona_id }),
                 ...(next.senderProfile && { input_sender_profile: next.senderProfile }), received_at: arrival };
@@ -628,6 +661,7 @@ export class Channels {
     }));
     const promise = opening.finally(() => {
       if (!launched) {
+        delete route.images;
         groups.delete(groupKey);
         if (!groups.size) this.inputTurns.delete(reg);
       }
@@ -656,6 +690,7 @@ export class Channels {
     identifier(adapter.account, "account");
     validateOrigin({ plugin: owner, ...(adapter.name === undefined ? {} : { platform: adapter.name }) });
     if (typeof adapter.send !== "function") throw Error("渠道需要 send 文本发送函数");
+    if (adapter.describeImages !== undefined && typeof adapter.describeImages !== "function") throw Error("渠道 describeImages 必须是函数");
     if (adapter.personaMode !== undefined && (adapter.personaMode !== "active" || adapter.persona !== undefined))
       throw Error("渠道 personaMode 只支持 active，且不能同时指定固定 persona");
     this.policy(adapter);
@@ -664,6 +699,7 @@ export class Channels {
     const reg = { adapter: { ...adapter }, owner, controller: new AbortController() } as Registration;
     const handle: ChannelHandle = {
       supportsSenderProfile: true,
+      supportsImageInput: true,
       currentPersona: () => {
         this.alive(reg);
         return this.policy(reg.adapter).persona;

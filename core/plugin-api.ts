@@ -240,12 +240,19 @@ export interface MemoryAPI {
 
 /** Optional platform display data for this message, independent of sender identity and permission. */
 export type SenderProfile = { nickname?: string; remark?: string };
-export type IncomingMessageData = { peer: string; sender: string; senderProfile?: SenderProfile; messageId: string; text: string };
+export type ChannelImage = Extract<ToolContentPart, { type: "image" }>;
+export type IncomingMessageData = {
+  peer: string; sender: string; senderProfile?: SenderProfile; messageId: string; text: string;
+  /** Transient images from the sender. For image-only messages use text: "". */
+  images?: ChannelImage[];
+};
 export type OutgoingMessage = { channel: string; account: string; peer: string; sessionId: string; text: string; deliveryId: string; replyTo?: string; transient?: true };
 export type ChannelAdapter = {
   id: string; name?: string; account: string; persona?: string; permission?: Permission;
   /** Follow the active host persona for each new turn. Mutually exclusive with persona. */
   personaMode?: "active";
+  /** Optional fallback when the main model explicitly rejects image input. */
+  describeImages?(input: { peer: string; messageId: string; images: ChannelImage[] }, context: { signal: AbortSignal }): Promise<string>;
   send(message: OutgoingMessage, options: { signal: AbortSignal }): Promise<void>;
 };
 export type ChannelResult = {
@@ -270,6 +277,8 @@ export type SendMessage = { peer: string; messageId: string; text: string };
 export type RebindOptions = { expectedSessionId: string | null; sessionId?: string };
 export interface ChannelHandle {
   readonly supportsSenderProfile?: true;
+  /** Check before supplying images to receive, openTurn or append. */
+  readonly supportsImageInput?: true;
   /** Read the effective persona ID without creating a session or binding a peer. */
   currentPersona?(): string;
   receive(message: IncomingMessageData, options?: ReceiveOptions): Promise<ChannelResult>;

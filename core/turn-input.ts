@@ -2,11 +2,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
-import type { SenderProfile } from "./plugin-api.ts";
+import type { ChannelImage, SenderProfile } from "./plugin-api.ts";
+import { channelImageFingerprint, CHANNEL_IMAGE_LIMITS } from "./channel-images.ts";
 
-export type TurnMessage = { messageId: string; text: string; senderProfile?: SenderProfile; receivedAt: string; timezone: string };
+export type TurnMessage = { messageId: string; text: string; images?: ChannelImage[]; senderProfile?: SenderProfile; receivedAt: string; timezone: string };
 export type TurnAppendResult = { status: "accepted" | "duplicate" | "closed" | "full" | "cancelled"; messageId: string };
-type Entry = { message: TurnMessage; saved: boolean; commit?: Promise<void> };
+type Entry = { message: TurnMessage; imageFingerprint?: string; saved: boolean; commit?: Promise<void> };
 
 /** One process-local turn. Persisted receipts are evidence, never a replay queue. */
 export class TurnInput {
@@ -14,6 +15,8 @@ export class TurnInput {
   private pending: Entry[] = [];
   private commits = new Set<Promise<void>>();
   private characters = 0;
+  private imageCount = 0;
+  private imageBytes = 0;
   private closed = false;
   private readonly historyFailure = new AbortController();
   readonly signal: AbortSignal;
@@ -49,38 +52,49 @@ export class TurnInput {
   constructor(initial: TurnMessage, signal: AbortSignal) {
     this.validate(initial);
     this.signal = AbortSignal.any([signal, this.historyFailure.signal]);
-    const message = structuredClone(initial);
-    this.seen.set(message.messageId, { message, saved: true });
+    // The initial pictures are already owned by the channel route; keep only their identity here.
+    const { images, ...fields } = initial;
+    const message = structuredClone(fields);
+    this.imageCount = images?.length ?? 0;
+    this.imageBytes = images?.reduce((sum, image) => sum + image.data.byteLength, 0) ?? 0;
+    this.seen.set(message.messageId, { message, imageFingerprint: images?.length ? channelImageFingerprint(images) : undefined, saved: true });
     this.characters = message.text.length;
   }
 
   private validate(message: TurnMessage) {
     if (!message || typeof message.messageId !== "string" || !message.messageId.trim())
       throw Error("消息ID不能为空");
-    if (typeof message.text !== "string" || !message.text.trim() || message.text.length > 16000)
+    if (typeof message.text !== "string" || (!message.text.trim() && !message.images?.length) || message.text.length > 16000)
       throw Error("请输入 1–16000 字");
   }
 
   async append(message: TurnMessage, persist?: () => Promise<void>): Promise<TurnAppendResult> {
     this.validate(message);
-    const snapshot = structuredClone(message), messageId = snapshot.messageId;
+    const messageId = message.messageId;
     if (this.signal.aborted) return { status: "cancelled", messageId };
+    const imageCount = message.images?.length ?? 0;
+    const imageFingerprint = imageCount ? channelImageFingerprint(message.images!) : undefined;
     const previous = this.seen.get(messageId);
     if (previous) {
-      if (previous.message.text !== snapshot.text) throw Error("同一消息ID对应了不同正文");
+      if (previous.message.text !== message.text || previous.imageFingerprint !== imageFingerprint) throw Error("同一消息ID对应了不同正文或图片");
       // A duplicate cannot acknowledge an original write that later fails.
       await previous.commit;
       return { status: "duplicate", messageId };
     }
     if (this.closed) return { status: "closed", messageId };
-    if (this.seen.size >= 128 || this.characters + snapshot.text.length > 128000)
+    const imageBytes = message.images?.reduce((sum, image) => sum + image.data.byteLength, 0) ?? 0;
+    if (this.seen.size >= 128 || this.characters + message.text.length > 128000 ||
+      this.imageCount + imageCount > CHANNEL_IMAGE_LIMITS.images || this.imageBytes + imageBytes > CHANNEL_IMAGE_LIMITS.totalBytes)
       return { status: "full", messageId };
 
     // Reserve synchronously, before the persistence callback can yield or fail.
-    const entry: Entry = { message: snapshot, saved: false };
+    const snapshot = structuredClone(message);
+    const entry: Entry = { message: snapshot, imageFingerprint, saved: false };
     this.seen.set(messageId, entry);
     this.pending.push(entry);
     this.characters += snapshot.text.length;
+    this.imageCount += imageCount;
+    this.imageBytes += imageBytes;
     const write = async () => {
       // A channel acknowledges its own durable receipt. Its history row is written
       // when the session consumes the message, inside the channel's generation task.
@@ -96,6 +110,8 @@ export class TurnInput {
       this.seen.delete(messageId);
       this.pending = this.pending.filter(item => item !== entry);
       this.characters -= snapshot.text.length;
+      this.imageCount -= imageCount;
+      this.imageBytes -= imageBytes;
       throw error;
     }).finally(() => { this.commits.delete(commit); });
     entry.commit = commit;
@@ -119,7 +135,13 @@ export class TurnInput {
       });
       this.signal.throwIfAborted();
     }
-    const rows = this.pending.filter(entry => entry.saved).map(entry => structuredClone(entry.message));
+    const rows = this.pending.filter(entry => entry.saved).map(({ message }) => {
+      const images = message.images;
+      delete message.images;
+      const row = structuredClone(message);
+      if (images) row.images = images;
+      return row;
+    });
     this.pending = [];
     return rows;
   }
@@ -134,4 +156,9 @@ export class TurnInput {
   }
 
   closeInput() { this.closed = true; }
+
+  /** A caller may keep its ChannelTurn handle after cancellation or completion. */
+  releaseImages() {
+    for (const entry of this.pending) delete entry.message.images;
+  }
 }

@@ -11,6 +11,7 @@ import { receiptSnapshot, type ToolTurn } from "./tool-retention.ts";
 import { toolContentSnapshot, ToolContentError } from "./tool-content.ts";
 import type { ToolContentPart } from "./plugin-api.ts";
 import type { ExecutionArchive } from "./execution-archive.ts";
+import { echoesPrivateChannelImage } from "./channel-images.ts";
 export class Tools {
   entries = new Map<string, any>();
   logger: Logger;
@@ -82,8 +83,9 @@ export class Tools {
       try {
         const result = await this.invoke(name, args, session, callId, turn);
         status = result.ok ? "completed" : session.signal?.aborted ? "cancelled" : "failed";
-        diagnostics.event("tool.end", { tool_call_id: callId, name, status, result,
-          ...(this.media.has(result) ? { content: this.media.get(result)!.content } : {}) });
+        const payload = { result, ...(this.media.has(result) ? { content: this.media.get(result)!.content } : {}) };
+        diagnostics.event("tool.end", { tool_call_id: callId, name, status,
+          ...(echoesPrivateChannelImage(payload) ? { content_omitted: "channel_images" } : payload) });
         return result;
       } catch (error) {
         diagnostics.event("tool.end", { tool_call_id: callId, name, status, error });
@@ -110,6 +112,8 @@ export class Tools {
     const report = async (ok: boolean, result: any, receipt: unknown = null) => {
       const returned = { ok, result };
       const stored = turn.transient ? { ok, result: receipt, transient: true as const } : returned;
+      if (echoesPrivateChannelImage(stored.result))
+        throw Error("工具返回了临时渠道图片，原始数据不保存");
       if (turn.transient) this.persisted.set(returned, stored as any);
       await execution?.write("tool_result", { round: turn.round, call, tool: storedName, ok,
         elapsed_ms: Date.now() - started, transient: turn.transient, permission: verdict,
@@ -173,6 +177,7 @@ export class Tools {
       }
       return report(true, result);
     } catch (error: any) {
+      if (echoesPrivateChannelImage(error?.message ?? error)) error = Error("工具处理渠道图片失败，原始错误不保存");
       this.diagnostics?.event("tool.error", { tool_call_id: callId, name, error });
       const message = error instanceof ToolContentError ? error.message : turn.transient ? "临时工具调用失败，未保存原始错误；外部动作结果请通过插件回执核对，不要自动重试。" : error?.message ?? String(error);
       this.logger.error("工具调用失败", { name: storedName, error: turn.transient ? message : error });

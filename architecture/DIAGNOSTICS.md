@@ -69,7 +69,9 @@ HTTP 错误沿用业务原有的限量读取；记录会说明正文完整、截
 - `tool.start/end/error`、`execution.error`：核心观察到的步骤与失败。工具成功不自动代表外部业务目标完成。
 - `capture.gap`：采集缺失及丢弃数量。不得把不完整记录显示成完整请求。
 
-媒体使用相对路径引用，先写附件再落事件：
+渠道来信的图片仅在当轮使用。处理这些图片的主模型请求与渠道辅助识图回调里的 `ctx.llm.chat` 请求记录状态和用量，`request.start` 标明 `body_omitted: "channel_images"`。这些请求的原始请求体、响应片段和原图不会写入诊断附件。
+
+其他可采集的媒体使用相对路径引用，先写附件再落事件：
 
 ```json
 {"$attachment":{"path":"attachments/content-hash.bin","mime":"application/octet-stream","sha256":"content-hash"}}

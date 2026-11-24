@@ -3,6 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { workerData } from "node:worker_threads";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,8 +24,37 @@ peer.bind("entry", {
   async start(kernel: any, directory: string) {
     const remote = kernel.ctx;
     const ctx = Object.create(null);
+    // A callback runs in this process. Carry its diagnostic privacy across any
+    // awaited work before it makes a new model RPC back to the host.
+    const imageCallback = new AsyncLocalStorage<true>();
+    const facades = new WeakMap<object, object>();
+    const imageFacade = (name: string, service: any) => {
+      if (!service || (name !== "llm" && name !== "channels")) return service;
+      const cached = facades.get(service);
+      if (cached) return cached;
+      const chat = (options: any) => service.chat(imageCallback.getStore()
+        ? { ...options, privateChannelImages: true } : options);
+      const register = (adapter: any) => {
+        if (typeof adapter?.describeImages !== "function") return service.register(adapter);
+        const describe = adapter.describeImages.bind(adapter);
+        return service.register({
+          ...adapter, id: adapter.id, name: adapter.name, account: adapter.account,
+          persona: adapter.persona, personaMode: adapter.personaMode, permission: adapter.permission,
+          send: adapter.send.bind(adapter),
+          describeImages: (...args: any[]) => imageCallback.run(true, () => describe(...args)),
+        });
+      };
+      const facade = new Proxy(service, { get(target, key) {
+        if (name === "llm" && key === "chat") return chat;
+        if (name === "channels" && key === "register") return register;
+        return Reflect.get(target, key);
+      } });
+      peer.alias(facade, service);
+      facades.set(service, facade);
+      return facade;
+    };
     for (const key of ["apiVersion", "logger", "signal", "config", "llm", "memory", "approval", "channels", "models", "personas", "sessions"])
-      Object.defineProperty(ctx, key, { enumerable: true, get: () => remote[key] });
+      Object.defineProperty(ctx, key, { enumerable: true, get: () => imageFacade(key, remote[key]) });
     const registerTool = (tool: any, mode: "register" | "registerTransient" | "registerMultimodal") => remote.tools[mode]({ ...tool, run: async (...args: any[]) => {
         try { return await tool.run(...args); }
         catch (error) {
@@ -40,7 +70,7 @@ peer.bind("entry", {
       list: () => remote.tools.list(),
       call: (...args: any[]) => remote.tools.call(...args),
     });
-    ctx.get = (name: string, strict?: boolean) => ["web", "tools"].includes(name) ? ctx[name] : kernel.get(name, strict);
+    ctx.get = (name: string, strict?: boolean) => ["web", "tools"].includes(name) ? ctx[name] : imageFacade(name, kernel.get(name, strict));
     ctx.optional = (name: string, listener: any) => {
       remote.signal.throwIfAborted();
       if (typeof listener !== "function") throw Error("可选服务需要状态回调");

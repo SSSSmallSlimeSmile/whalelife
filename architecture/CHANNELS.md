@@ -1,8 +1,8 @@
-# 文本渠道接口
+# 渠道接口
 
 本文说明现有渠道实现。主干整体状态及渠道职责偏厚的边界问题统一见 [STATUS.md](STATUS.md)。现有接口继续有效；文档整理未迁移或删除渠道代码，也不表示主干应继续增加平台业务。
 
-通用渠道负责接收适配器规范化的纯文本、选择稳定会话、调用现有聊天流程，并将最终文本交给适配器发送。模型选择、工具权限、会话历史、独立事实、摘要、认知检索和 token 统计仍由 `Sessions` / Memory V2 处理。本实现没有安装任何平台插件，也没有主动调度器。
+通用渠道接收适配器提供的文字和可选临时图片，选择会话并将最终文本交给适配器发送。模型选择、工具权限、会话历史、独立事实、摘要、认知检索和 token 统计由 `Sessions` / Memory V2 处理。
 
 ## 插件接口
 
@@ -57,12 +57,12 @@ export async function apply(ctx: Context) {
 }
 ```
 
-`register({id, name?, account, persona?, personaMode?, permission?, send})` 返回：
+`register({id, name?, account, persona?, personaMode?, permission?, send, describeImages?})` 返回：
 
 | 方法 | 行为 |
 | --- | --- |
-| `receive({peer,sender,messageId,text}, {signal?}?)` | 生成并发送最终回复，返回带 sessionId/status/deliveryId 的结果 |
-| `openTurn?({peer,sender,messageId,text}, {signal?}?)` | 可选的轮内追加入口；返回 `Promise<ChannelTurn>`，本轮继续排队/生成，最终只投递一次回复 |
+| `receive({peer,sender,messageId,text,images?}, {signal?}?)` | 生成并发送最终回复，返回带 sessionId/status/deliveryId 的结果 |
+| `openTurn?({peer,sender,messageId,text,images?}, {signal?}?)` | 可选的轮内追加入口；返回 `Promise<ChannelTurn>`，本轮继续排队/生成，最终只投递一次回复 |
 | `bind(peer, existingSessionId)` | 首次使用前绑定已有且未删除的会话；相同绑定可重复调用 |
 | `rebind(peer,{expectedSessionId,sessionId?})` | 显式切换会话；expectedSessionId为预期旧绑定，null表示首次；省略sessionId则显式新建；在途时拒绝迁移 |
 | `send({peer,messageId,text}, {signal?}?)` | 直接发送文本并记录回执，确认成功后将完整正文保存为同会话助手历史，不生成模型回复 |
@@ -72,6 +72,35 @@ export async function apply(ctx: Context) {
 | `dispose()` | 注销账号、取消生命周期信号；可重复调用 |
 
 `ctx.channels.send({channel,account,peer,messageId,text}, options?)` 是同插件已注册账号的直接发送便捷入口。它不能使用其他插件的账号。`send` 不是授权机制：插件须在自己的工具权限与业务授权范围内调用。
+
+## 入站临时图片
+
+注册适配器后检查 `channel.supportsImageInput === true`。支持时，`receive`、`openTurn` 和 `turn.append` 都接受 `images?: ChannelImage[]`。每张图提供 `type: "image"`、`mimeType`、`data: Uint8Array` 及可选的 `detail: "auto" | "low" | "high"`。格式限 PNG、JPEG、WebP，字节签名须匹配。单张最大 4 MiB，一轮渠道来信合计最多 16 张、16 MiB。图片由渠道取得并校验来源，动图由渠道选帧转码。纯图片消息传 `text: ""`。
+
+适配器可在注册时提供 `describeImages`。主模型先直接接收本条发言和图片。仅当模型服务明确拒绝图片输入时，主干才按消息调用该回调，使用它返回的简短描述在原轮继续回复。主模型可以看图时，回调调用次数为零。适配器可以这样接入：
+
+```ts
+const channel = ctx.channels.register({
+  id: "example", account: "personal",
+  async send(message, { signal }) {
+    await transport.sendText(message.peer, message.text, { signal, id: message.deliveryId });
+  },
+  async describeImages({ images }, { signal }) {
+    return await describeWithConfiguredModel(images, { signal });
+  },
+});
+
+if (channel.supportsImageInput === true) {
+  await channel.receive({
+    peer, sender, messageId, text: caption,
+    images: [{ type: "image", mimeType: "image/png", data: pngBytes }],
+  });
+}
+```
+
+`transport` 和 `describeWithConfiguredModel` 由插件提供。回调收到当前消息的 `peer`、`messageId` 和图片，以及本轮的取消信号。插件应传递 `signal`，返回 1 至 8192 个 UTF-16 代码单元的非空白描述，禁止回显原图，并将辅助请求的失败作为异常抛出。回调缺失、失败或描述无效时，该轮生成失败。鉴权、限流、网络、图片损坏、超时和取消均不触发辅助识图。若同一请求还含工具返回的图片，主干无法确定拒绝来自哪张图，按模型错误结束。回退保留已执行工具的结果，仍只发送一次最终回复。
+
+图片字节及辅助描述只用于当轮推理。用户文字和最终发出的回复按原渠道规则记入会话，纯图片消息在历史中保留占位。插件自己发起的 HTTP、日志和存储由插件负责保护。旧宿主缺少能力标识时，插件可以沿用已有的文字描述路径，或向用户说明该版本尚不能收图。省略图片的旧调用继续工作。
 
 ## 入站发言人
 
@@ -201,7 +230,7 @@ Web 的 `/ws/chat` 通过同一可信生成入口进入 Sessions，保留显式 
 
 绑定和回执随记忆备份保存；删除会话仍保留独立去重回执和绑定墓碑。活动渠道任务阻止相关删除与全局恢复。恢复旧备份会合并当前已经发生的渠道回执，不把已执行的消息变回未执行；备份里不存在的现有路由保留回执，缺少会话时补墓碑并要求显式重绑。原子提交失败保持旧绑定，冲突或损坏数据拒绝恢复。
 
-本轮仅提供文本、稳定路由、可靠失败分类和插件生命周期接口；未包含真实 QQ/微信等平台适配器、图片/语音/附件、平台认证、自动重试调度、收件限流或路由迁移 UI。外部消息ID不会自动过期清理；独立回执索引随路由消息量增长，高吞吐部署需规划存储容量。平台连接、自动重试和业务限流属于插件。
+主干支持文字、入站临时图片、稳定路由、失败分类和插件生命周期。平台连接、认证、媒体读取与转码、自动重试和业务限流归渠道插件负责。外部消息 ID 和独立回执索引随路由消息量增长，高吞吐部署需规划存储容量。
 
 ## 本地验证
 

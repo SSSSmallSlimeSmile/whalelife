@@ -3,6 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { receiveMessageOnPort, type MessagePort } from "node:worker_threads";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 type Packet = Record<string, any>;
 type Transport = { send(message: Packet): void };
@@ -46,6 +47,9 @@ export class PluginRPC {
   readonly port?: MessagePort;
   readonly wake?: Int32Array;
   private lastPulse = 0;
+  // A sync call can pump unrelated callbacks from the port. Dispatch them in
+  // the same context as an independent port event, not the waiting callback.
+  private readonly dispatchIncoming = AsyncLocalStorage.bind((packet: Packet) => this.receive(packet));
   constructor(options: { side: "host" | "plugin"; transport: Transport; onFault(error: Error): void; timeout: number; port?: MessagePort; wake?: Int32Array }) {
     Object.assign(this, options);
     this.side = options.side; this.transport = options.transport; this.onFault = options.onFault; this.timeout = options.timeout;
@@ -302,7 +306,7 @@ export class PluginRPC {
     while (!this.syncResults.has(id)) {
       if (this.ended) throw this.ended;
       const item = receiveMessageOnPort(this.port!);
-      if (item) { this.receive(item.message); continue; }
+      if (item) { this.dispatchIncoming(item.message); continue; }
       if (Date.now() >= until) { const error = Error("插件接口等待超时"); this.onFault(error); throw error; }
       if (Date.now() - this.lastPulse > 100) { this.lastPulse = Date.now(); this.send({ type: "pulse" }); }
       const count = Atomics.load(this.wake!, 0); Atomics.wait(this.wake!, 0, count, 10);
