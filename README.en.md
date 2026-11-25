@@ -18,10 +18,6 @@ Tell your companion about a book on QQ, then return to the web console and conti
 
 You choose the model and edit the persona. Changing a persona keeps the current session unless you explicitly create a new one. Automatic diary summarization is off by default; you can enable it at a context-usage threshold you choose. Diary entries then replace the corresponding messages in the model's context while the original records remain available. Model context limits still apply.
 
-![WhaleLife web console showing a conversation with sample data](architecture/assets/console-preview.jpg)
-
-*The current console uses Chinese labels. This preview contains sample data.*
-
 ## Get started
 
 You will need **Node.js 24 or later** and access to a model service. Configure your own cloud API or local OpenAI-compatible endpoint; the model must support the chat and tool-calling features you use. Cloud providers charge according to their own pricing. Running the console locally does not make cloud model requests local.
