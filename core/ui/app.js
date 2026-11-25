@@ -599,7 +599,7 @@ class ConsoleApp {
       if (m.role === "user") {
         // 中途补充（nudge）也挂在 user 上，但它是同一轮的补充，不是新的一问。
         // 判据只认两条可靠信号：内存里刚发出去的那条带 nudge 标记；
-        // 刷新后从服务端读回来的，用户行上多了 external_message_id（nudge_ 开头）。
+        // 刷新后从服务端读回来的，用户行上多了 external_message_id，且来自 web 渠道、形状对得上。
         // 旧写法还拿「上一轮还没有回答」来猜，可中断、取消之后用户重新发问也是这个形状，
         // 独立的新问题会被并进上一轮，导航上等于没有入口。（勘 2026-11-26 修）
         const isNudge = !!m.nudge || isNudgeRow(m);
@@ -1608,9 +1608,14 @@ function clip(text, max) {
 }
 
 /** 服务端落库的中途补充行带 external_message_id，值是前端发的 nudge_ 开头的消息 ID。
-    刷新后 nudge 标记没了，靠它才认得出来（勘 2026-11-26）。 */
+    刷新后 nudge 标记没了，靠它才认得出来（勘 2026-11-26）。
+    两道一起看：渠道必须是 web，形状必须是我们自己生成的那种。
+    只按前缀猜会撞车——别的渠道的入站消息 ID 由平台给（QQ 是纯数字号，
+    契约也允许 nudge_qq123 这种），撞上就把一条独立的新问并进上一轮了。 */
+const NUDGE_ID = /^nudge_[a-z0-9]{12,32}$/;
 function isNudgeRow(row) {
-  return typeof row?.external_message_id === "string" && row.external_message_id.startsWith("nudge_");
+  if (row?.originChannel !== "web") return false;
+  return typeof row.external_message_id === "string" && NUDGE_ID.test(row.external_message_id);
 }
 function messageRows(rows, positions) {
   return rows
@@ -1621,6 +1626,10 @@ function messageRows(rows, positions) {
       text: row.text,
       protocolOriginal: row.tool_protocol_original,
       personaName: row.persona_name,
+      // 分节判据要用这两项：补充行落库时带的 external_message_id，以及它来自哪个渠道。
+      // 这一层以前只留 id/role/text，刷新之后补充行就认不出来了。（勘 2026-11-26）
+      originChannel: row.origin?.channel ?? row.channel,
+      ...(typeof row.external_message_id === "string" ? { external_message_id: row.external_message_id } : {}),
     }));
 
 }

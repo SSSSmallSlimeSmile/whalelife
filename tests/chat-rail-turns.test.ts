@@ -140,7 +140,10 @@ function makeApp(elements: Record<string, FakeNode>) {
   vm.runInContext(patched, sandbox, { filename: "app.js" });
   const App = sandbox.__ConsoleApp;
   assert.equal(typeof App, "function", "没拿到 ConsoleApp");
-  return new App();
+  const app = new App();
+  // 暴露 vm 的全局，测试才能直接调真 messageRows，而不是绕过它手塞字段。
+  (app as any).__api = sandbox;
+  return app;
 }
 
 function rail(elements: Record<string, FakeNode>) {
@@ -232,16 +235,17 @@ test("拉到顶之后，轮号是全会话轮号，且加载更多不会把它�
 
 test("刷新后读回来的补充带 external_message_id，照样并回上一轮", () => {
   const app = rail({});
-  // 服务端落库的补充行没有 nudge 标记，但带 external_message_id（nudge_ 开头）
-  app.state.messages = [
-    { role: "user", text: "帮我看看这个报错", id: "u1" },
-    { role: "user", text: "顺便把日志也读一下", id: "u2", external_message_id: "nudge_abc123" },
-    { role: "assistant", text: "报错是缓存没命中，日志我看过了" },
-    { role: "user", text: "好" },
-    { role: "assistant", text: "行" },
-    { role: "user", text: "再问一句" },
-    { role: "assistant", text: "嗯" },
-  ];
+  // 走真链：服务端行 → messageRows → 分节。以前这些测试直接往 state.messages 手塞字段，
+  // 恰好绕过了 messageRows 那一层，所以「刷新后认不出」这个洞一直是绿的。（勘 2026-11-26）
+  app.state.messages = app.__api.messageRows([
+    { type: "message", role: "user", text: "帮我看看这个报错", id: "u1", origin: { channel: "web" } },
+    { type: "message", role: "user", text: "顺便把日志也读一下", id: "u2", origin: { channel: "web" }, external_message_id: "nudge_mwuyg262yeho5rg3" },
+    { type: "message", role: "assistant", text: "报错是缓存没命中，日志我看过了" },
+    { type: "message", role: "user", text: "好", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "行" },
+    { type: "message", role: "user", text: "再问一句", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "嗯" },
+  ], undefined);
   app.renderOutline();
   assert.equal(app.railTurns.length, 3, "两条连着的用户消息是一问加一条补充，不是两问");
   assert.equal(app.railTurns[0].ask, "帮我看看这个报错");
@@ -251,15 +255,15 @@ test("刷新后读回来的补充带 external_message_id，照样并回上一轮
 });
 test("补充只会并进当前这一轮，不会串到下一轮", () => {
   const app = rail({});
-  app.state.messages = [
-    { role: "user", text: "问一" },
-    { role: "assistant", text: "答一" },
-    { role: "user", text: "问二" },
-    { role: "user", text: "补二", external_message_id: "nudge_x1" },
-    { role: "assistant", text: "答二" },
-    { role: "user", text: "问三" },
-    { role: "assistant", text: "答三" },
-  ];
+  app.state.messages = app.__api.messageRows([
+    { type: "message", role: "user", text: "问一", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "答一" },
+    { type: "message", role: "user", text: "问二", origin: { channel: "web" } },
+    { type: "message", role: "user", text: "补二", origin: { channel: "web" }, external_message_id: "nudge_mwuzb9itk8385ws8" },
+    { type: "message", role: "assistant", text: "答二" },
+    { type: "message", role: "user", text: "问三", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "答三" },
+  ], undefined);
   app.renderOutline();
   assert.equal(app.railTurns.length, 3);
   assert.equal(app.railTurns[0].nudges.length, 0, "第一轮不该拿到第二轮的补充");
@@ -312,4 +316,71 @@ test("前缀未知时，最新一轮的编号也不假装是全会话轮号", ()
   app.showRailCard(new FakeNode({ dataset: { page: "latest" } }));
   assert.match(String(card.innerHTML), /已加载第 3 轮/, "要说明这是已加载的轮号");
   assert.doesNotMatch(String(card.innerHTML), /^(?![\s\S]*已加载)[\s\S]*第 3 轮$/, "不能直接说第 3 轮");
+});
+
+// ---- 补充判据的两道闸（勘 2026-11-26）----
+// 作者在 #39 上指出：只按 "nudge_" 前缀猜，渠道契约允许的 nudge_qq123 这类普通 ID 会撞车，
+// 一条独立的新问会被并进上一轮，导航上等于没有入口。
+
+function turnCount(app: any, rows: any[]) {
+  app.state.messages = app.__api.messageRows(rows, undefined);
+  app.renderOutline();
+  return app.railTurns.length;
+}
+
+test("messageRows 把判据要用的两项带出来，别的字段照旧", () => {
+  const app = rail({});
+  const rows = app.__api.messageRows([
+    { type: "message", role: "user", text: "问", id: "u1", origin: { channel: "web" }, external_message_id: "nudge_mwuyg262yeho5rg3", persona_name: "勘" },
+    { type: "message", role: "assistant", text: "答" },
+    { type: "channel_receipt", role: "user", text: "不该出现" },
+  ], undefined);
+  assert.equal(rows.length, 2, "只留 type=message 的行");
+  assert.equal(rows[0].originChannel, "web", "渠道要带出来");
+  assert.equal(rows[0].external_message_id, "nudge_mwuyg262yeho5rg3", "external_message_id 不能在映射时丢掉");
+  assert.equal(rows[0].personaName, "勘", "原有的字段不许被改坏");
+  assert.equal(rows[1].external_message_id, undefined, "没有就别硬塞一个 undefined 值");
+});
+
+test("qq 渠道的 ID 再像 nudge_ 也不当补充", () => {
+  const app = rail({});
+  const n = turnCount(app, [
+    { type: "message", role: "user", text: "问一", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "答一" },
+    { type: "message", role: "user", text: "问二", origin: { channel: "web" } },
+    { type: "message", role: "user", text: "qq 来的一条正常消息", origin: { channel: "qq" }, external_message_id: "nudge_qq123456789012" },
+    { type: "message", role: "assistant", text: "答二" },
+  ]);
+  assert.equal(n, 3, "qq 那条是新的一问，不能并进上一轮");
+  assert.equal(app.railTurns[2].ask, "qq 来的一条正常消息");
+});
+
+test("web 渠道的普通消息（web_xxx）不并进上一轮", () => {
+  const app = rail({});
+  const n = turnCount(app, [
+    { type: "message", role: "user", text: "问一", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "答一" },
+    { type: "message", role: "user", text: "问二", origin: { channel: "web" } },
+    { type: "message", role: "user", text: "这是独立一问", origin: { channel: "web" }, external_message_id: "web_dafa1c399aa1d08a" },
+    { type: "message", role: "assistant", text: "答二" },
+  ]);
+  assert.equal(n, 3, "web 渠道的普通 ID 不是补充");
+});
+
+test("渠道不明或形状太短的，一律不当补充", () => {
+  const noOrigin = turnCount(rail({}), [
+    { type: "message", role: "user", text: "问一" },
+    { type: "message", role: "assistant", text: "答一" },
+    { type: "message", role: "user", text: "问二" },
+    { type: "message", role: "user", text: "带 ID 但没渠道", external_message_id: "nudge_mwuyg262yeho5rg3" },
+  ]);
+  assert.equal(noOrigin, 3, "认不出渠道就不能当补充");
+
+  const tooShort = turnCount(rail({}), [
+    { type: "message", role: "user", text: "问一", origin: { channel: "web" } },
+    { type: "message", role: "assistant", text: "答一" },
+    { type: "message", role: "user", text: "问二", origin: { channel: "web" } },
+    { type: "message", role: "user", text: "短的 ID", origin: { channel: "web" }, external_message_id: "nudge_abc123" },
+  ]);
+  assert.equal(tooShort, 3, "不是我们生成的那种形状就别猜");
 });
