@@ -613,7 +613,7 @@ class ConsoleApp {
       }
       if (turn && m.text) turn.answers.push(plainText(m.text));
     });
-    if (this.railTurns.length < 3) {
+    if (this.railTurns.length < 3 && !(this.railTurns.length && this.state.paging?.hasMore)) {
       rail.hidden = true;
       rail.innerHTML = "";
       this.railStart = null;
@@ -719,12 +719,16 @@ class ConsoleApp {
   }
   /** 轨道顶格「载入更早」：往前拉一页历史，批次停在原处不跳（勘 2026-11-26）。 */
   async railLoadOlder() {
+    if (this.loadingOlder) return;
+    const session = this.state.session;
+    const box = $("messages");
     const before = (this.railTurns || []).length;
     const startBefore = Number.isFinite(this.railStart) ? this.railStart : 0;
     await this.loadOlder();
+    if (session !== this.state.session || box !== $("messages")) return;
     const added = (this.railTurns || []).length - before;
     // 没拉到（正在加载、或者已经没有更早的）就别动刻度
-    if (!added) return;
+    if (added <= 0) return;
     // 新轮全加在前面：原来的第 startBefore 轮现在是 startBefore + added
     this.railPinned = false;
     this.railStart = Math.max(0, Math.min(startBefore + added, (this.railTurns || []).length - 1));
@@ -819,13 +823,13 @@ class ConsoleApp {
       return;
     }
     target.scrollIntoView({ block: "start", behavior: "smooth" });
-    // 程序滚动的真正终点是 scrollend，到了就立刻撤保护，别让固定超时兜。
-    // 慢设备上平滑滚动可能拖过几秒，超时一过、高亮还在末尾，批次就被拽回最新（勘 2026-11-26 修）。
+    // 用户打断平滑滚动也会触发 scrollend，交给 syncRail 确认高亮是否到达目标批次。
     const box = $("messages");
-    if (box && typeof box.addEventListener === "function") {
+    const jump = this.railJump;
+    if (jump && box && typeof box.addEventListener === "function") {
       const done = () => {
         box.removeEventListener("scrollend", done);
-        this.railJump = null;
+        if (this.railJump === jump && box === $("messages")) this.syncRail();
       };
       box.addEventListener("scrollend", done, { once: true, passive: true });
     }
@@ -1553,10 +1557,13 @@ class ConsoleApp {
         hasMore: page.hasMore,
       };
       const rows = messageRows(page.items, page.positions);
-      if (!rows.length) return;
       // 只有拉到顶（start 0）才敢说「前面没有更早的了」，这时已加载的轮序就是全会话轮序。
       // 中间那几页只攒了个半截数，不能拿去显示成绝对轮号，宁可继续标「已加载」。（勘 2026-11-26 修）
       this.railPrefix = page.start === 0 ? 0 : undefined;
+      if (!rows.length) {
+        this.renderOutline();
+        return;
+      }
       this.state.messages = rows.concat(this.state.messages);
       this.renderMessages({ anchor: "keep" });
       this.setScrollTop(box, box.scrollHeight - prevHeight + prevTop);

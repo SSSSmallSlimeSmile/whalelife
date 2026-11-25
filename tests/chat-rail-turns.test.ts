@@ -662,11 +662,50 @@ test("拉到更早的历史之后，轮号按新增的轮数整体后移", async
   assert.equal(Number(ticks[0].dataset.turn), 3, "原来的第 0 轮，现在是第 3 轮");
 });
 
-test("程序滚动结束（scrollend）就撤掉保护，不必等超时", () => {
-  const { app, messages } = longSession();
+test("scrollend 只有在高亮进入目标批次后才撤保护", () => {
+  const { app, cursor, messages } = longSession();
   app.railPage("prev");
+  const targetStart = app.railStart;
   assert.ok(app.railJump, "翻页时挂上保护");
   assert.equal(messages.listeners.scrollend?.length ?? 0, 1, "要在消息区上等 scrollend");
   messages.fire("scrollend");
-  assert.equal(app.railJump, null, "滚动一结束就撤，慢设备上不会被超时兜着弹回末尾");
+  assert.ok(app.railJump, "滚动提前结束且仍在批外时保留保护");
+  assert.equal(app.railStart, targetStart);
+
+  app.railPage("next");
+  cursor.at = 152;
+  messages.fire("scrollend");
+  assert.equal(app.railJump, null, "高亮进入目标批次时立即撤保护");
+});
+
+test("只有一两轮、但前面还有更早的历史时，轨道不整个隐藏", () => {
+  const railEl = railWithTicks();
+  const app = rail({ "chat-rail": railEl });
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+  ];
+  app.state.paging = { total: 240, start: 236, end: 240, hasMore: true };
+  app.renderOutline();
+  assert.notEqual(railEl.hidden, true, "前面还有更早的历史时，藏掉轨道等于把入口也藏了");
+  assert.equal(ticksOf(railEl).filter((t) => t.dataset.turn !== undefined).length, 2, "两轮各一格");
+
+  app.state.paging = { total: 2, start: 0, end: 2, hasMore: false };
+  app.renderOutline();
+  assert.equal(railEl.hidden, true, "真的只有两轮、前面也没了，这时候才收起来");
+});
+
+test("已经在拉更早历史时，再点一次「载入更早」不会重复发起", async () => {
+  const { app } = longSession();
+  app.state.paging = { total: 240, start: 120, end: 200, hasMore: true };
+  let calls = 0;
+  app.loadOlder = async () => { calls += 1; };
+  app.loadingOlder = true;
+  await app.railLoadOlder();
+  assert.equal(calls, 0, "上一页还在路上时，第二次点击要被挡住");
+  app.loadingOlder = false;
+  await app.railLoadOlder();
+  assert.equal(calls, 1, "没在拉的时候正常发起");
 });
