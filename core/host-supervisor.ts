@@ -29,6 +29,7 @@ export interface HostUpdateState {
   backupSlot?: string;
   // Older trials booted real plugins and may already have delivered external work.
   preflightOnly?: true;
+  rollbackFailure?: { trigger: string; detail: string };
   delivery?: { previous: string | null; plugins: string[] };
   lastResult: { status: Outcome; version: string; message: string; at: string } | null;
 }
@@ -38,6 +39,8 @@ function parseState(raw: string): HostUpdateState {
   if (!s || !(s.active === null || validVersion(s.active)) ||
     !(s.pending === null || (validVersion(s.pending) && ["preparing", "trial", "handover"].includes(s.phase))) ||
     (s.backupSlot !== undefined && !validHostBackupSlot(s.backupSlot)) ||
+    (s.rollbackFailure !== undefined && (!s.pending || typeof s.rollbackFailure?.trigger !== "string" ||
+      typeof s.rollbackFailure?.detail !== "string")) ||
     (s.delivery !== undefined && !(s.pending === null && validVersion(s.active) && s.delivery &&
       (s.delivery.previous === null || validVersion(s.delivery.previous)) &&
       Array.isArray(s.delivery.plugins) && s.delivery.plugins.every((id: unknown) => typeof id === "string"))) ||
@@ -222,11 +225,22 @@ function launch(root: string, program: string, trial: boolean) {
 const result = (status: Outcome, version: string, message: string) => ({ status, version, message, at: new Date().toISOString() });
 async function recover(root: string, state: HostUpdateState, message: string) {
   if (!state.pending) return state;
+  const trigger = state.rollbackFailure?.trigger ?? message;
   if (state.phase === "trial" || state.phase === "handover") {
     if (state.preflightOnly !== true) throw Error("旧启动器的更新中断，插件可能已执行外部操作。请先复制整个实例目录，核对现有插件投递记录及 .whalelife-updates/backup；确认要保留的程序和资料后再恢复启动。现场、旧快照和 state.json 均已保留。");
-    await restoreHostBackup(root, state.backupSlot);
+    try {
+      await restoreHostBackup(root, state.backupSlot);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const failure = { trigger: trigger.slice(0, 2048), detail: detail.slice(0, 2048) };
+      // Keep the pending selection and snapshot intact. A later retry can report the
+      // original trial failure even after a second failure while restoring files.
+      try { await save(root, { ...state, rollbackFailure: failure }); }
+      catch (journalError) { writeLogOutput("无法记录本体回滚失败详情：" + String(journalError), "stderr"); }
+      throw Error(`本体 v${state.pending} 更新中断：${trigger}。恢复升级前资料失败：${detail}`, { cause: error });
+    }
   }
-  const restored: HostUpdateState = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("rolled-back", state.pending, message) };
+  const restored: HostUpdateState = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("rolled-back", state.pending, trigger) };
   await save(root, restored);
   return restored;
 }
@@ -287,7 +301,7 @@ export async function runHostSupervisor(instanceRoot: string, options: Superviso
       state = { active: state.active, pending: null, backupSlot: state.backupSlot, lastResult: result("updated", state.active!, "沿用上次接管选定的版本，已保留现有资料") };
       await save(root, state);
     } else {
-      state = await recover(root, state, "上次更新中断，已恢复之前的版本");
+      state = await recover(root, state, "上次更新中断");
     }
     const cleanLater = () => {
       clearTimeout(cleanupTimer);

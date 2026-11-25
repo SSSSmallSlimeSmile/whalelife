@@ -75,6 +75,27 @@ test("loss of a formerly running plugin restores data touched by trial and resta
   assert.match(state.lastResult!.message, /gallery/);
   assert.deepEqual(await readFile(image), original);
 });
+test("a blocked rollback retains both causes and reports the original trial failure after recovery", async () => {
+  const { root, target } = await fixture();
+  await program(target, "0.2.0", `
+    const dir = join(root, '.whalelife-updates');
+    const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+    writeFileSync(join(dir, state.backupSlot, 'owner'), 'invalid fixture marker');
+    plugins = [];
+  `);
+  await assert.rejects(runHostSupervisor(root), /gallery.*恢复升级前资料失败.*备份目录归属不明/);
+  const failed = await readHostUpdateState(root);
+  assert.equal(failed.pending, "0.2.0");
+  assert.match(failed.rollbackFailure!.trigger, /gallery/);
+  assert.match(failed.rollbackFailure!.detail, /备份目录归属不明/);
+  await writeFile(join(root, ".whalelife-updates", failed.backupSlot!, "owner"), "whalelife.host-backup/1");
+  assert.equal(await runHostSupervisor(root), 0);
+  const restored = await readHostUpdateState(root);
+  assert.equal(restored.pending, null);
+  assert.equal(restored.rollbackFailure, undefined);
+  assert.equal(restored.lastResult?.status, "rolled-back");
+  assert.equal(restored.lastResult?.message, failed.rollbackFailure!.trigger);
+});
 test("after rollback the old program starts before its restored backup is retired", async () => {
   const {root,target} = await fixture();
   await program(root,"0.1.0", `

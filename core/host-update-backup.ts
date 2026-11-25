@@ -2,7 +2,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import type { BigIntStats } from "node:fs";
+import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { directoryAt } from "./instance-directory.ts";
 
@@ -96,6 +98,47 @@ export async function prepareHostBackup(root: string, slot?: string) {
   await rename(base, committed);
 }
 
+function unchanged(before: BigIntStats, after: BigIntStats) {
+  return before.dev === after.dev && before.ino === after.ino && before.mode === after.mode &&
+    before.size === after.size && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs;
+}
+
+async function fileDigest(path: string, before: BigIntStats, buffer: Buffer) {
+  const file = await open(path, "r");
+  try {
+    if (!unchanged(before, await file.stat({bigint:true}))) throw Error("校验前文件已变化：" + path);
+    const hash = createHash("sha256");
+    let remaining = before.size;
+    while (remaining > 0n) {
+      const count = remaining < BigInt(buffer.length) ? Number(remaining) : buffer.length;
+      const { bytesRead } = await file.read(buffer, 0, count, null);
+      if (!bytesRead) throw Error("校验时文件提前结束：" + path);
+      hash.update(buffer.subarray(0, bytesRead));
+      remaining -= BigInt(bytesRead);
+    }
+    if (!unchanged(before, await file.stat({bigint:true}))) throw Error("校验期间文件已变化：" + path);
+    return hash.digest("hex");
+  } finally { await file.close(); }
+}
+
+// A separate plugin service may still be running from this tree. Skip its rename only
+// after comparing both complete trees, including empty directories and large model files.
+async function verifyPluginSnapshot(live: string, saved: string, buffer: Buffer): Promise<void> {
+  const [a,b] = await Promise.all([lstat(live,{bigint:true}), lstat(saved,{bigint:true})]);
+  const mismatch = () => Error("当前插件与更新前的快照不一致：" + live);
+  if (a.mode !== b.mode || a.isSymbolicLink() || b.isSymbolicLink()) throw mismatch();
+  if (a.isDirectory() && b.isDirectory()) {
+    const names = await readdir(live);
+    const expected = new Set(await readdir(saved));
+    if (names.length !== expected.size || names.some(name => !expected.has(name))) throw mismatch();
+    for (const name of names) await verifyPluginSnapshot(join(live,name), join(saved,name), buffer);
+  } else if (a.isFile() && b.isFile()) {
+    if (a.size !== b.size || await fileDigest(live,a,buffer) !== await fileDigest(saved,b,buffer)) throw mismatch();
+  } else throw mismatch();
+  if (!unchanged(a,await lstat(live,{bigint:true})) || !unchanged(b,await lstat(saved,{bigint:true})))
+    throw Error("核对插件快照期间目录或文件已变化：" + live);
+}
+
 export async function restoreHostBackup(root: string, slot?: string) {
   const name = backupName(slot);
   const base = await validateBackup(root, slot);
@@ -115,7 +158,19 @@ export async function restoreHostBackup(root: string, slot?: string) {
       if (!(await stat(restoring))?.isFile() || !(await stat(target))) throw Error("原始备份或恢复记录缺失：" + item.path);
       continue; // Already renamed back during an earlier interrupted restore.
     }
-    if (await stat(target)) await rename(target, displaced);
+    if (await stat(target)) {
+      try { await rename(target, displaced); }
+      catch (error) {
+        if (item.path !== "plugins" || !item.present || !busy(error) || await stat(displaced)) throw error;
+        try {
+          await verifyPluginSnapshot(target, saved, Buffer.allocUnsafe(256 * 1024));
+        } catch (comparison) {
+          throw Error(`插件目录无法移动（${(error as NodeJS.ErrnoException).code}），保留当前目录和快照。` +
+            (comparison instanceof Error ? comparison.message : String(comparison)), {cause: error});
+        }
+        continue; // The installed tree already holds the saved bytes. Keep the snapshot until the old host is serving.
+      }
+    }
     if (item.present) {
       await writeFile(restoring, "", {mode: 0o600});
       await rename(saved, target);

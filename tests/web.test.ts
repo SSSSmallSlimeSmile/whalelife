@@ -2,9 +2,28 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { once } from "node:events";
+import { connect } from "node:net";
 import { WebSocket } from "ws";
 import { Logger } from "../core/logger.ts";
 import { startWeb } from "../core/web.ts";
+
+test("a gated host closes browser preconnections before finishing preflight", async t => {
+  const app = await startWeb({ web: { port: 0 } }, { channels: {}, logger: { info() {} }, hostStarting: () => true }, {});
+  t.after(() => app.close());
+  const address = app.server.address();
+  assert.ok(address && typeof address === "object");
+  const accepted = once(app.server, "connection");
+  const socket = connect(address.port, "127.0.0.1");
+  t.after(() => socket.destroy());
+  await Promise.all([accepted, once(socket, "connect")]);
+  const disconnected = once(socket, "close");
+  let expired = false;
+  const deadline = setTimeout(() => { expired = true; socket.destroy(); }, 2000);
+  try {
+    await Promise.all([app.close(), disconnected]);
+    assert.equal(expired, false, "the host closed the connection without waiting for the client");
+  } finally { clearTimeout(deadline); }
+});
 
 test("the plugin update GET returns a local snapshot and only the check POST fetches the market approvals", async t => {
   const browserFetch = globalThis.fetch;

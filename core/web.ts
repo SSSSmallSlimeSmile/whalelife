@@ -769,7 +769,11 @@ export async function startWeb(config: any, services: any, runtime: any) {
       const handlers = routes.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();
-      await Promise.all([handlers, new Promise<void>((r) => server.close(() => r()))]);
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      // A gated worker has accepted no user operations. A browser preconnect can
+      // otherwise keep server.close() pending until the supervisor's shutdown deadline.
+      if (services.hostStarting?.()) server.closeAllConnections();
+      await Promise.all([handlers, closed]);
     },
   };
 }

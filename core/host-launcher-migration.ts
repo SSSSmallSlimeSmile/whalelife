@@ -24,8 +24,16 @@ const stock: Record<string, string> = {
 const launcherFiles = ["host-supervisor.ts", "host-child.ts", "host-launcher-bridge.ts", "host-launcher-check.ts",
   "host-update-backup.ts", "instance-directory.ts", "log-output.ts", "process-lifecycle.ts"];
 // Pin the code that stays with the original installation. Its digest is checked in the release tests.
-export const launcherBundleDigest = "3f75eb515e5ee4e08014e22d8182e3c241e1ef8d171ee3cc9c2d757e0391f876";
+const previousLauncher = "3f75eb515e5ee4e08014e22d8182e3c241e1ef8d171ee3cc9c2d757e0391f876";
+export const launcherBundleDigest = "28c69e5d30a51a6ba32015b6ece18d3597226ac0b973e9d2a5f0ab7b545a6ac7";
 const supervisor = "host-supervisor.ts", child = "host-child.ts";
+const backupModule = "host-update-backup.ts";
+const backupRevisions = new Set([
+  "cb090df66a171df59afa53507ee0ce3fdfc30b23553b4652b2ab8916c09c62d8", // ef3cf56, first versioned backup slots
+  "35afac03f2dffd4ecedfcd34ab7168e31e7552228b3150f21d779319b35686de", // official v0.1.2–v0.1.5
+]);
+const entryHeader = "/*! Copyright (c) 2026 iinukami and contributors. SPDX-License-Identifier: AGPL-3.0-only. See LICENSE-ADDITIONAL. */\n";
+const publishedPath = (bundle: string) => ".whalelife-updates/launchers/" + bundle;
 const sourceDir = dirname(fileURLToPath(import.meta.url));
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const matchesStock = (name: string, bytes: Buffer) => {
@@ -67,17 +75,17 @@ async function syncDirectory(path: string) {
   try { await dir.sync(); } finally { await dir.close(); }
 }
 
-async function publishBundle(root: string, files: Map<string, Buffer>) {
+async function publishBundle(root: string, files: Map<string, Buffer>, bundle = launcherBundleDigest) {
   const area = ".whalelife-updates/launchers";
   const parent = (await directoryAt(root, area, true))!;
-  const relative = area + "/" + launcherBundleDigest;
+  const relative = publishedPath(bundle);
   let target = await directoryAt(root, relative);
   if (!target) {
     const staging = await mkdtemp(join(parent, ".stage-"));
     try {
       for (const [name, bytes] of files) await writeNew(join(staging, name), bytes);
       await syncDirectory(staging);
-      target = join(parent, launcherBundleDigest);
+      target = join(parent, bundle);
       await rename(staging, target);
       await syncDirectory(parent);
     } finally { await rm(staging, {recursive:true, force:true}); }
@@ -85,6 +93,42 @@ async function publishBundle(root: string, files: Map<string, Buffer>) {
   if ((await readdir(target)).length !== files.size) throw Error("已有启动器目录包含未知文件");
   for (const [name, bytes] of files)
     if (!(await ordinaryFile(join(target, name))).equals(bytes)) throw Error("已暂存的启动器文件不匹配：" + name);
+}
+
+function launcherEntries(bundle: string) {
+  const base = "../" + publishedPath(bundle) + "/";
+  return new Map([
+    [supervisor, Buffer.from(entryHeader + 'export * from "' + base + supervisor + '";\n')],
+    [child, Buffer.from(entryHeader + 'import { runHostLauncherBridge } from "' + base +
+      'host-launcher-bridge.ts";\nawait runHostLauncherBridge();\n')],
+  ]);
+}
+
+function coldEntry(original: Buffer) {
+  if (!matchesStock("index.ts", original)) throw Error("原启动入口与正式 v0.1.1 不一致。");
+  const source = original.toString("utf8"), from = 'await import("./host-supervisor.ts")';
+  if (source.split(from).length !== 2) throw Error("无法识别原启动入口。");
+  return Buffer.from(source.replace(from, 'await import("../' + publishedPath(launcherBundleDigest) + '/' + supervisor + '")'));
+}
+
+// Bare slotted managers import this small helper from the installation root. It starts
+// taking effect on the next standard launcher start. Preserve the previous exact bytes
+// outside automatically retired transaction backups. Old roots can lack instance-directory.ts.
+export async function migrateSlottedBackup(root: string, core: string) {
+  const path = join(core, backupModule), before = await ordinaryFile(path);
+  if (!backupRevisions.has(hash(before))) {
+    const text = before.toString("utf8");
+    if (/(?<!\r)\n/.test(text) || !backupRevisions.has(hash(Buffer.from(text.replaceAll("\r\n", "\n"))))) return;
+  }
+  const files = await readLauncherBundle(sourceDir);
+  const bundle = "rollback-" + launcherBundleDigest;
+  await publishBundle(root, new Map([
+    [backupModule, files.get(backupModule)!], ["instance-directory.ts", files.get("instance-directory.ts")!],
+    [backupModule + ".original", before],
+  ]), bundle);
+  const forward = Buffer.from(entryHeader + 'export * from "../' + publishedPath(bundle) + '/' + backupModule + '";\n');
+  await replaceEntry(path, before, forward);
+  await syncDirectory(core);
 }
 
 async function replaceEntry(path: string, before: Buffer, after: Buffer) {
@@ -104,55 +148,75 @@ async function replaceEntry(path: string, before: Buffer, after: Buffer) {
 // supervisor persists handover before this probe, and cannot commit until it gets our reply.
 export async function migrateStockLauncher(root: string) {
   if (!process.connected || process.argv[4] !== "trial" || !process.argv[1] ||
-      resolve(process.argv[1]) !== join(root, "core", child) || resolve(process.argv[2]) !== root ||
-      resolve(process.argv[3]) !== dirname(sourceDir)) return;
+      resolve(process.argv[2]) !== root || resolve(process.argv[3]) !== dirname(sourceDir)) return;
+  const worker = resolve(process.argv[1]), rootWorker = join(root, "core", child);
+  if (worker !== rootWorker && worker !== join(root, publishedPath(previousLauncher), child)) return;
   const state = await readHostUpdateState(root);
-  if (state.phase !== "handover" || !state.pending || !state.preflightOnly || state.backupSlot) return;
+  if (state.phase !== "handover" || !state.pending || !state.preflightOnly) return;
   const versionDir = await directoryAt(root, ".whalelife-updates/releases/" + state.pending);
   if (!versionDir || dirname(sourceDir) !== versionDir || await realpath(sourceDir) !== sourceDir)
     throw Error("启动器迁移需要从本实例已校验的发行目录启动");
   const packageBytes = await ordinaryFile(join(root, "package.json"));
   const pkg = JSON.parse(packageBytes.toString("utf8").replace(/^\uFEFF/, ""));
-  if (pkg.name !== "whalelife" || pkg.version !== "0.1.1") return;
+  if (pkg.name !== "whalelife") return;
   const record = JSON.parse((await ordinaryFile(join(versionDir, ".whalelife-release.json"))).toString("utf8"));
   if (record.version !== state.pending || !/^[a-f0-9]{64}$/.test(record.digest)) throw Error("发行包校验记录不匹配");
   const core = (await directoryAt(root, "core"))!;
-  const header = "/*! Copyright (c) 2026 iinukami and contributors. SPDX-License-Identifier: AGPL-3.0-only. See LICENSE-ADDITIONAL. */\n";
-  const relative = ".whalelife-updates/launchers/" + launcherBundleDigest;
-  const base = "../" + relative + "/";
-  const entries = new Map([
-    [supervisor, Buffer.from(header + 'export * from "' + base + supervisor + '";\n')],
-    [child, Buffer.from(header + 'import { runHostLauncherBridge } from "' + base +
-      'host-launcher-bridge.ts";\nawait runHostLauncherBridge();\n')],
-  ]);
-  const original = new Map<string, Buffer>();
+  const entries = launcherEntries(launcherBundleDigest), priorEntries = launcherEntries(previousLauncher);
+  if (state.backupSlot && worker === rootWorker) {
+    await migrateSlottedBackup(root, core);
+    return;
+  }
+  if (pkg.version !== "0.1.1") return;
+  const original = new Map<string, Buffer>(), before = new Map<string, Buffer>();
   const installed = new Set<string>();
+  const migratingPinnedManager = worker !== rootWorker;
   for (const name of Object.keys(stock)) {
     let bytes = await ordinaryFile(join(core, name));
-    if (entries.get(name)?.equals(bytes)) {
-      const prior = await directoryAt(root, relative);
+    before.set(name, bytes);
+    if (migratingPinnedManager && name === "index.ts" && !matchesStock(name, bytes)) {
+      const prior = await directoryAt(root, publishedPath(launcherBundleDigest));
+      if (!prior) return; // A custom standard entry remains under its maintainer's control.
+      const saved = await ordinaryFile(join(prior, name + ".original"));
+      if (!coldEntry(saved).equals(bytes)) return;
+      bytes = saved;
+    }
+    const currentEntry = entries.get(name)?.equals(bytes);
+    if (currentEntry || priorEntries.get(name)?.equals(bytes)) {
+      const prior = await directoryAt(root, publishedPath(currentEntry ? launcherBundleDigest : previousLauncher));
       if (!prior) throw Error("缺少已迁移启动器的备份");
       bytes = await ordinaryFile(join(prior, name + ".original"));
-      installed.add(name);
+      if (currentEntry) installed.add(name);
     }
     if (!matchesStock(name, bytes)) throw Error("原启动器与正式 v0.1.1 不一致，已保留现有文件：" + name);
-    if (name === supervisor || name === child) original.set(name, bytes);
+    if (name === supervisor || name === child || name === "index.ts") original.set(name, bytes);
   }
   const files = await readLauncherBundle(sourceDir);
   for (const [name, bytes] of original) files.set(name + ".original", bytes);
   await publishBundle(root, files);
 
+  if (migratingPinnedManager) {
+    // The resident previous-generation manager fingerprints both root forwarders before
+    // every subsequent update. Preserve them and use the new manager only on a cold start.
+    const index = "index.ts", after = coldEntry(original.get(index)!);
+    if (!before.get(index)!.equals(after)) {
+      await replaceEntry(join(core, index), before.get(index)!, after);
+      await syncDirectory(core);
+    }
+    return;
+  }
+
   // Cold starts now use the complete new manager and its paired child from the same
   // immutable directory. Only the already-running old parent uses the second entry.
   if (!installed.has(supervisor))
-    await replaceEntry(join(core, supervisor), original.get(supervisor)!, entries.get(supervisor)!);
+    await replaceEntry(join(core, supervisor), before.get(supervisor)!, entries.get(supervisor)!);
   try {
     await syncDirectory(core);
     if (!installed.has(child))
-      await replaceEntry(join(core, child), original.get(child)!, entries.get(child)!);
+      await replaceEntry(join(core, child), before.get(child)!, entries.get(child)!);
   } catch (error) {
     if (!installed.has(supervisor))
-      await replaceEntry(join(core, supervisor), entries.get(supervisor)!, original.get(supervisor)!);
+      await replaceEntry(join(core, supervisor), entries.get(supervisor)!, before.get(supervisor)!);
     await syncDirectory(core);
     throw error;
   }
