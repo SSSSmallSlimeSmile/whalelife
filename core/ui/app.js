@@ -1620,17 +1620,21 @@ function isNudgeRow(row) {
 function messageRows(rows, positions) {
   return rows
     .filter((row) => row.type === "message")
-    .map((row, index) => ({
-      id: row.id || (positions ? "historical-line:" + positions[index] : undefined),
-      role: row.role,
-      text: row.text,
-      protocolOriginal: row.tool_protocol_original,
-      personaName: row.persona_name,
-      // 分节判据要用这两项：补充行落库时带的 external_message_id，以及它来自哪个渠道。
-      // 这一层以前只留 id/role/text，刷新之后补充行就认不出来了。（勘 2026-11-26）
-      originChannel: row.origin?.channel ?? row.channel,
-      ...(typeof row.external_message_id === "string" ? { external_message_id: row.external_message_id } : {}),
-    }));
+    .map((row, index) => {
+      const originChannel = row.origin?.channel;
+      const channel = row.channel;
+      // 渠道记录冲突时保留独立的导航入口，避免把普通消息当作补充。
+      const conflictingChannels = originChannel != null && channel != null && originChannel !== channel;
+      return {
+        id: row.id || (positions ? "historical-line:" + positions[index] : undefined),
+        role: row.role,
+        text: row.text,
+        protocolOriginal: row.tool_protocol_original,
+        personaName: row.persona_name,
+        originChannel: conflictingChannels ? undefined : originChannel ?? channel,
+        ...(typeof row.external_message_id === "string" ? { external_message_id: row.external_message_id } : {}),
+      };
+    });
 
 }
 

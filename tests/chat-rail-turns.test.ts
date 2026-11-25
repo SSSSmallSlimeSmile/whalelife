@@ -240,6 +240,7 @@ test("刷新后读回来的补充带 external_message_id，照样并回上一轮
   app.state.messages = app.__api.messageRows([
     { type: "message", role: "user", text: "帮我看看这个报错", id: "u1", origin: { channel: "web" } },
     { type: "message", role: "user", text: "顺便把日志也读一下", id: "u2", origin: { channel: "web" }, external_message_id: "nudge_mwuyg262yeho5rg3" },
+    { type: "message", role: "user", text: "也看一下缓存", channel: "web", external_message_id: "nudge_mwuzb9itk8385ws8" },
     { type: "message", role: "assistant", text: "报错是缓存没命中，日志我看过了" },
     { type: "message", role: "user", text: "好", origin: { channel: "web" } },
     { type: "message", role: "assistant", text: "行" },
@@ -247,10 +248,11 @@ test("刷新后读回来的补充带 external_message_id，照样并回上一轮
     { type: "message", role: "assistant", text: "嗯" },
   ], undefined);
   app.renderOutline();
-  assert.equal(app.railTurns.length, 3, "两条连着的用户消息是一问加一条补充，不是两问");
+  assert.equal(app.railTurns.length, 3, "连续两条补充都应挂在原问题下");
   assert.equal(app.railTurns[0].ask, "帮我看看这个报错");
-  assert.equal(app.railTurns[0].nudges.length, 1);
+  assert.equal(app.railTurns[0].nudges.length, 2);
   assert.equal(app.railTurns[0].nudges[0], "顺便把日志也读一下");
+  assert.equal(app.railTurns[0].nudges[1], "也看一下缓存");
   assert.equal(app.railTurns[0].answers.length, 1, "原问题不能变成「没有回答」");
 });
 test("补充只会并进当前这一轮，不会串到下一轮", () => {
@@ -365,6 +367,19 @@ test("web 渠道的普通消息（web_xxx）不并进上一轮", () => {
     { type: "message", role: "assistant", text: "答二" },
   ]);
   assert.equal(n, 3, "web 渠道的普通 ID 不是补充");
+});
+
+test("渠道记录冲突时保留独立问题的导航入口", () => {
+  for (const [originChannel, channel] of [["web", "qq"], ["qq", "web"], ["", "web"], [0, "web"]]) {
+    const app = rail({});
+    const n = turnCount(app, [
+      { type: "message", role: "user", text: "上一问" },
+      { type: "message", role: "user", text: "独立新问", origin: { channel: originChannel }, channel,
+        external_message_id: "nudge_mwuyg262yeho5rg3" },
+    ]);
+    assert.equal(n, 2, `origin.channel=${JSON.stringify(originChannel)}, channel=${channel}`);
+    assert.equal(app.railTurns[1].ask, "独立新问");
+  }
 });
 
 test("渠道不明或形状太短的，一律不当补充", () => {
