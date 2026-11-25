@@ -598,10 +598,11 @@ class ConsoleApp {
     (this.state.messages || []).forEach((m, index) => {
       if (m.role === "user") {
         // 中途补充（nudge）也挂在 user 上，但它是同一轮的补充，不是新的一问。
-        // 旧写法给它单开一节，原问题那节就变成「没有回答」。（勘 2026-11-26 修）
-        // 只有内存里刚发出去的那条带 nudge 标记；刷新后从服务端读回来的是普通 user 消息，
-        // 所以还要按位置判：上一轮已经开了、但还没有任何回答，这条就是补充，不是新的一问。
-        const isNudge = m.nudge || (turn && turn.answers.length === 0);
+        // 判据只认两条可靠信号：内存里刚发出去的那条带 nudge 标记；
+        // 刷新后从服务端读回来的，用户行上多了 external_message_id（nudge_ 开头）。
+        // 旧写法还拿「上一轮还没有回答」来猜，可中断、取消之后用户重新发问也是这个形状，
+        // 独立的新问题会被并进上一轮，导航上等于没有入口。（勘 2026-11-26 修）
+        const isNudge = !!m.nudge || isNudgeRow(m);
         if (isNudge && turn) {
           if (m.text) turn.nudges.push(plainText(m.text));
           return;
@@ -725,7 +726,7 @@ class ConsoleApp {
     if (tick.dataset.page === "latest") {
       // 倒数第一格固定是「最新的一轮」，不是「又一批」（勘 2026-11-25 修）
       head = "最新的一轮";
-      body = "第 " + (prefix === null ? total : prefix + total) + " 轮";
+      body = prefix === null ? "已加载第 " + total + " 轮" : "第 " + (prefix + total) + " 轮";
       meta =
         (prefix === null ? "共 " + total + " 轮（已加载）· 前面还有更早的" : "共 " + (prefix + total) + " 轮") +
         " · 点一下跳回最新的对话";
@@ -1604,6 +1605,12 @@ const SESSION_PAGE = 40;
 function clip(text, max) {
   const flat = String(text || "").trim();
   return flat.length > max ? flat.slice(0, max) + "…" : flat;
+}
+
+/** 服务端落库的中途补充行带 external_message_id，值是前端发的 nudge_ 开头的消息 ID。
+    刷新后 nudge 标记没了，靠它才认得出来（勘 2026-11-26）。 */
+function isNudgeRow(row) {
+  return typeof row?.external_message_id === "string" && row.external_message_id.startsWith("nudge_");
 }
 function messageRows(rows, positions) {
   return rows

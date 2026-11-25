@@ -230,12 +230,12 @@ test("拉到顶之后，轮号是全会话轮号，且加载更多不会把它�
   assert.doesNotMatch(String(card.innerHTML), /已加载第/, "前缀已知时不该再退成「已加载」");
 });
 
-test("刷新后读回来的补充没有 nudge 标记，按位置也要并回上一轮", () => {
+test("刷新后读回来的补充带 external_message_id，照样并回上一轮", () => {
   const app = rail({});
-  // 服务端存下来的行只有 role/text，既没有 nudge 也没有 nudgeId
+  // 服务端落库的补充行没有 nudge 标记，但带 external_message_id（nudge_ 开头）
   app.state.messages = [
-    { role: "user", text: "帮我看看这个报错" },
-    { role: "user", text: "顺便把日志也读一下" },
+    { role: "user", text: "帮我看看这个报错", id: "u1" },
+    { role: "user", text: "顺便把日志也读一下", id: "u2", external_message_id: "nudge_abc123" },
     { role: "assistant", text: "报错是缓存没命中，日志我看过了" },
     { role: "user", text: "好" },
     { role: "assistant", text: "行" },
@@ -249,14 +249,13 @@ test("刷新后读回来的补充没有 nudge 标记，按位置也要并回上�
   assert.equal(app.railTurns[0].nudges[0], "顺便把日志也读一下");
   assert.equal(app.railTurns[0].answers.length, 1, "原问题不能变成「没有回答」");
 });
-
 test("补充只会并进当前这一轮，不会串到下一轮", () => {
   const app = rail({});
   app.state.messages = [
     { role: "user", text: "问一" },
     { role: "assistant", text: "答一" },
     { role: "user", text: "问二" },
-    { role: "user", text: "补二" },
+    { role: "user", text: "补二", external_message_id: "nudge_x1" },
     { role: "assistant", text: "答二" },
     { role: "user", text: "问三" },
     { role: "assistant", text: "答三" },
@@ -266,4 +265,51 @@ test("补充只会并进当前这一轮，不会串到下一轮", () => {
   assert.equal(app.railTurns[0].nudges.length, 0, "第一轮不该拿到第二轮的补充");
   assert.equal(app.railTurns[1].nudges.length, 1);
   assert.equal(app.railTurns[1].answers[0], "答二");
+});
+test("上一轮中断没留下回答时，新问不能并进上一轮", () => {
+  const app = rail({});
+  // 上一轮被中断：用户问了一句，之后没有 assistant 文本，直接是新的一问
+  app.state.messages = [
+    { role: "user", text: "帮我跑一下那个脚本", id: "u1" },
+    { role: "user", text: "算了，先别跑了，看看日志", id: "u2" },
+    { role: "assistant", text: "日志里没有相关报错" },
+  ];
+  app.renderOutline();
+  assert.equal(app.railTurns.length, 2, "中断之后重新发问是独立一问，不能被并进上一轮");
+  assert.equal(app.railTurns[0].ask, "帮我跑一下那个脚本");
+  assert.equal(app.railTurns[0].nudges.length, 0, "没有 nudge 信号的不能当补充");
+  assert.equal(app.railTurns[1].ask, "算了，先别跑了，看看日志", "新问题要能在导航上找到");
+  assert.equal(app.railTurns[1].answers.length, 1);
+});
+
+test("旧的补充行（既无标记也无 external_message_id）宁可多一节，也不吞掉新问题", () => {
+  const app = rail({});
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "user", text: "无标记的第二条" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+  ];
+  app.renderOutline();
+  assert.equal(app.railTurns.length, 3, "认不出是补充时按独立一节处理，不猜");
+  assert.equal(app.railTurns[1].ask, "无标记的第二条");
+});
+
+test("前缀未知时，最新一轮的编号也不假装是全会话轮号", () => {
+  const app = rail({});
+  app.railPrefix = undefined;
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  const card = app.railCard();
+  app.showRailCard(new FakeNode({ dataset: { page: "latest" } }));
+  assert.match(String(card.innerHTML), /已加载第 3 轮/, "要说明这是已加载的轮号");
+  assert.doesNotMatch(String(card.innerHTML), /^(?![\s\S]*已加载)[\s\S]*第 3 轮$/, "不能直接说第 3 轮");
 });
