@@ -40,6 +40,9 @@ export function hostUpdateContent(app) {
   if (!busy && data?.supported === false && !error) {
     status = "当前安装方式不支持一键更新";
   }
+  if (!busy && error && data?.lastCheckedAt && (ui.error || !data.checked)) {
+    status = "上次成功检查 " + new Date(data.lastCheckedAt).toLocaleString("zh-CN", { hour12: false });
+  }
   const info = [current, status].filter(Boolean).join(" · ");
   const last = data?.lastResult;
   const resultLabel = { updated: "更新成功", "rolled-back": "更新失败，已回滚", failed: "更新失败" }[last?.status];

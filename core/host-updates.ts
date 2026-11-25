@@ -22,6 +22,7 @@ export class HostUpdates {
   private request: typeof fetch;
   private launcherReady: () => boolean;
   private release?: HostRelease | null;
+  private lastCheckedAt?: string;
   private checking?: Promise<void>;
   private phase: "idle" | "preparing" | "restarting" = "idle";
   private error?: string;
@@ -40,6 +41,7 @@ export class HostUpdates {
     if (this.phase === "idle") {
       this.checking ??= latestHostRelease(this.current, this.request).then(release => {
         this.release = release;
+        this.lastCheckedAt = new Date().toISOString();
         this.error = undefined;
       }).catch((error: unknown) => {
         this.release = undefined;
@@ -55,6 +57,7 @@ export class HostUpdates {
     const lastResult = this.failed ?? stored?.lastResult ?? undefined;
     const supported = !!this.activate && this.launcherReady();
     return { current: this.current, latest: this.release ? { version: this.release.version, url: this.release.url } : null,
+      lastCheckedAt: this.lastCheckedAt,
       checked: this.release !== undefined, phase: this.phase, supported, lastResult,
       error: this.error ?? (this.release && this.activate && !supported ? launcherUpgradeNeeded : undefined) };
   }
@@ -63,6 +66,7 @@ export class HostUpdates {
     if (!this.activate) throw conflict("当前启动方式不支持自动重启，请用标准启动入口运行 WhaleLife。");
     if (!this.launcherReady()) throw conflict(launcherUpgradeNeeded);
     if (this.phase !== "idle") throw conflict("本体更新正在进行。");
+    if (this.checking) throw conflict("正在检查更新，请在检查完成后确认。");
     const release = this.release;
     if (!release || input?.confirmed !== true || input.version !== release.version)
       throw conflict("请重新检查本体版本，并确认要安装的版本。");

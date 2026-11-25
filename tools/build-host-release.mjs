@@ -4,13 +4,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { decodeHostArchive, hostAssetName, hostProgramPath, hostReleaseRootFiles } from "../core/host-release.ts";
+import { decodeHostArchive, hostAssetName, hostManifestName, hostProgramPath, hostReleaseRootFiles } from "../core/host-release.ts";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
 const officialRepository = "https://github.com/iinukami/whalelife.git";
@@ -129,10 +129,23 @@ async function build(sourceRoot, outputDirectory, official) {
     decodeHostArchive(raw, version);
     const archive = gzipSync(raw, { level: 9 });
     if (archive.length > 40 * 1024 ** 2) throw Error("压缩后的本体包超出大小上限");
-    const output = join(resolve(outputDirectory), name);
+    const output = join(resolve(outputDirectory), name), manifestPath = join(dirname(output), hostManifestName);
+    const size = archive.length, sha256 = createHash("sha256").update(archive).digest("hex");
+    const manifest = { format: 1, version, size, sha256 };
+    const stagedArchive = join(work, name), stagedManifest = join(work, hostManifestName);
+    await writeFile(stagedArchive, archive);
+    await writeFile(stagedManifest, JSON.stringify(manifest, null, 2) + "\n");
     await mkdir(dirname(output), { recursive: true });
-    await writeFile(output, archive, { flag: "wx" });
-    return { path: output, ...(commit ? { tag: "v" + version, commit } : {}) };
+    // The manifest is published last. Concurrent builds may each create an archive, but only
+    // the owner of the fixed manifest can finish. A losing build removes only its new archive.
+    await copyFile(stagedArchive, output, constants.COPYFILE_EXCL);
+    try {
+      await copyFile(stagedManifest, manifestPath, constants.COPYFILE_EXCL);
+    } catch (error) {
+      await unlink(output);
+      throw error;
+    }
+    return { path: output, manifestPath, size, sha256, ...(commit ? { tag: "v" + version, commit } : {}) };
   } finally {
     if (dirname(work) !== resolve(tmpdir())) throw Error("临时依赖目录路径无效");
     await rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
@@ -148,6 +161,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [out, source = project, extra] = official ? argv.slice(1) : argv;
   if (!out || out.startsWith("--") || extra) throw Error("用法：node tools/build-host-release.mjs [--release] <输出目录> [源码目录]");
   const result = await build(source, out, official);
-  const bytes = await readFile(result.path);
-  console.log(JSON.stringify({ ...result, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }));
+  console.log(JSON.stringify(result));
 }

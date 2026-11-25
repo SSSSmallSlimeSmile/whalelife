@@ -9,7 +9,8 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 
 const repository = "https://github.com/iinukami/whalelife";
-const endpoint = "https://api.github.com/repos/iinukami/whalelife/releases/latest";
+export const hostManifestName = "whalelife-update.json";
+const manifestURL = repository + "/releases/latest/download/" + hostManifestName;
 const githubCDNs = new Set(["https://release-assets.githubusercontent.com", "https://objects.githubusercontent.com"]);
 const versionPattern = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const compressedLimit = 40 * 1024 ** 2;
@@ -75,56 +76,74 @@ async function githubAccessMessage(response: Response) {
   return "GitHub 暂时限制了更新查询。" + (time ? `请在北京时间 ${time} 后再试，` : "请稍后再试，") + alternative;
 }
 
-/** A missing first Release is normal. An unreachable or malformed release is a check failure. */
-export async function latestHostRelease(current: string, request: typeof fetch = fetch): Promise<HostRelease | null> {
-  if (!versionPattern.test(current)) throw Error("当前本体版本号无效");
-  const response = await request(endpoint, { redirect: "error", credentials: "omit", referrerPolicy: "no-referrer",
-    headers: { Accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(10_000) });
-  if (response.status !== 200) {
-    if (response.status === 403 || response.status === 429)
-      throw new GitHubReleaseQueryError(await githubAccessMessage(response));
-    await response.body?.cancel();
-    if (response.status === 404) return null;
-    throw new GitHubReleaseQueryError(`GitHub 发行服务返回 HTTP ${response.status}，请稍后再试。`);
-  }
-  const meta = JSON.parse((await boundedBytes(response, headerLimit)).toString("utf8"));
-  if (meta?.draft === true || meta?.prerelease === true) return null;
-  if (meta?.draft !== false || meta?.prerelease !== false || typeof meta.tag_name !== "string" ||
-      !meta.tag_name.startsWith("v")) throw Error("GitHub 正式发行信息无效");
-  const version: string = meta.tag_name.slice(1), name = hostAssetName(version);
-  const parts = current.split(".").map(Number);
-  const difference = version.split(".").map((v, i) => Number(v) - parts[i]).find(n => n !== 0) ?? 0;
-  if (difference <= 0) return null;
-  const matches = Array.isArray(meta.assets) ? meta.assets.filter((a: any) => a?.name === name) : [];
-  const asset = matches[0];
-  if (matches.length !== 1 || asset.state !== "uploaded" || asset.browser_download_url !== downloadURL(version) ||
-      typeof asset.digest !== "string" || !asset.digest.startsWith("sha256:")) throw Error("此正式版本缺少可校验的本体发行附件");
-  const release = { version, url: meta.html_url, size: asset.size, digest: asset.digest.slice(7) };
-  validateRelease(release);
-  return release;
+function requestAsset(url: string | URL, signal: AbortSignal, request: typeof fetch) {
+  return request(url, { redirect: "manual", credentials: "omit", referrerPolicy: "no-referrer",
+    headers: { Accept: "application/octet-stream", "Accept-Encoding": "identity" }, signal });
 }
 
-async function download(release: HostRelease, request: typeof fetch) {
-  const source = downloadURL(release.version), signal = AbortSignal.timeout(180_000);
+const redirects = new Set([301, 302, 303, 307, 308]);
+
+/** Follow only redirects issued for an already pinned release asset. */
+async function fetchAsset(source: string, signal: AbortSignal, request: typeof fetch) {
   let url = new URL(source);
   for (let i = 0; i < 6; i++) {
-    const response = await request(url, { redirect: "manual", credentials: "omit", referrerPolicy: "no-referrer",
-      headers: { Accept: "application/octet-stream", "Accept-Encoding": "identity" }, signal });
-    if (response.status === 200) {
-      const bytes = await boundedBytes(response, release.size);
-      if (bytes.length !== release.size || createHash("sha256").update(bytes).digest("hex") !== release.digest)
-        throw Error("本体发行包大小或 SHA-256 校验失败");
-      return bytes;
-    }
-    await response.body?.cancel();
+    const response = await requestAsset(url, signal, request);
     const location = response.headers.get("location");
-    if (![301, 302, 303, 307, 308].includes(response.status) || !location)
-      throw Error(`获取本体发行包失败（HTTP ${response.status}）`);
+    if (!redirects.has(response.status) || !location) return response;
+    await response.body?.cancel();
     url = new URL(location, url);
     if (url.username || url.password || !(githubCDNs.has(url.origin) || url.href === source))
       throw Error("拒绝跳转至非 GitHub 发行附件地址");
   }
   throw Error("GitHub 发行附件重定向次数过多");
+}
+
+async function manifestFailure(response: Response): Promise<never> {
+  if (response.status === 403 || response.status === 429)
+    throw new GitHubReleaseQueryError(await githubAccessMessage(response));
+  await response.body?.cancel();
+  if (response.status === 404)
+    throw new GitHubReleaseQueryError("GitHub 正式发行版缺少更新清单，请稍后再试或查看「GitHub 正式发行版」。");
+  throw new GitHubReleaseQueryError(`GitHub 发行服务返回 HTTP ${response.status}，请稍后再试。`);
+}
+
+export async function latestHostRelease(current: string, request: typeof fetch = fetch): Promise<HostRelease | null> {
+  if (!versionPattern.test(current)) throw Error("当前本体版本号无效");
+  const signal = AbortSignal.timeout(10_000);
+  const latest = await requestAsset(manifestURL, signal, request);
+  if (!redirects.has(latest.status) && latest.status !== 200) return manifestFailure(latest);
+  await latest.body?.cancel();
+  const location = latest.headers.get("location");
+  if (!redirects.has(latest.status) || !location) throw Error("更新清单缺少正式版本标签");
+  const tagged = new URL(location, manifestURL);
+  const version = tagged.pathname.split("/").at(-2)?.slice(1) ?? "";
+  if (!versionPattern.test(version) || tagged.href !== `${repository}/releases/download/v${version}/${hostManifestName}`)
+    throw Error("更新清单必须来自官方仓库的正式版本标签");
+  const response = await fetchAsset(tagged.href, signal, request);
+  if (response.status !== 200) return manifestFailure(response);
+  const bytes = await boundedBytes(response, 16 * 1024);
+  let manifest;
+  try { manifest = JSON.parse(bytes.toString("utf8")); }
+  catch { throw Error("本体更新清单 JSON 无效"); }
+  if (manifest?.format !== 1 || manifest.version !== version || typeof manifest.sha256 !== "string" ||
+      Object.keys(manifest).length !== 4) throw Error("本体更新清单格式或版本与正式标签不符");
+  const release = { version, url: repository + "/releases/tag/v" + version, size: manifest.size, digest: manifest.sha256 };
+  validateRelease(release);
+  const parts = current.split(".").map(Number);
+  const difference = version.split(".").map((v, i) => Number(v) - parts[i]).find(n => n !== 0) ?? 0;
+  return difference > 0 ? release : null;
+}
+
+async function download(release: HostRelease, request: typeof fetch) {
+  const response = await fetchAsset(downloadURL(release.version), AbortSignal.timeout(180_000), request);
+  if (response.status !== 200) {
+    await response.body?.cancel();
+    throw Error(`获取本体发行包失败（HTTP ${response.status}）`);
+  }
+  const bytes = await boundedBytes(response, release.size);
+  if (bytes.length !== release.size || createHash("sha256").update(bytes).digest("hex") !== release.digest)
+    throw Error("本体发行包大小或 SHA-256 校验失败");
+  return bytes;
 }
 
 export const hostReleaseRootFiles = ["package.json", "package-lock.json", "LICENSE", "LICENSE-ADDITIONAL", "NOTICE.md", "THIRD_PARTY_NOTICES.md"];

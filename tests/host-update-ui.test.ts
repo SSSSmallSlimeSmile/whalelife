@@ -108,6 +108,12 @@ test("offline checks can be retried, and only the host's returned outcome is sho
   assert.match(view.slot.innerHTML, /更新成功/);
   assert.match(view.slot.innerHTML, /当前版本 v0\.1\.1 · 暂无更高的正式版本/);
   assert.doesNotMatch(hostUpdateContent({ hostUpdate: { data: { ...ready, supported: false } } }), /data-host-action="open"/);
+  const failedCheck = hostUpdateContent({ hostUpdate: { data: {
+    ...ready, latest: null, checked: false, error: "无法读取更新清单", lastCheckedAt: "2026-11-21T10:20:30.000Z",
+  } } });
+  assert.match(failedCheck, /上次成功检查/);
+  assert.match(failedCheck, /无法读取更新清单/);
+  assert.doesNotMatch(failedCheck, /暂无更高的正式版本|data-host-action="open"/);
 });
 
 test("opening and idling on the overview only read local status; a click checks GitHub", async t => {

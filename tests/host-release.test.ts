@@ -16,26 +16,64 @@ import { temporaryDirectory } from "./temporary-directory.ts";
 const repo = "https://github.com/iinukami/whalelife";
 const version = "0.10.0", url = repo + "/releases/tag/v" + version, filename = hostAssetName(version);
 const assetURL = repo + "/releases/download/v" + version + "/" + filename;
-const metadata = { tag_name: "v" + version, html_url: url, prerelease: false, draft: false,
-  assets: [{ name: filename, state: "uploaded", browser_download_url: assetURL, size: 100, digest: "sha256:" + "a".repeat(64) }] };
-const jsonResponse = (value: unknown): typeof fetch => async () => Response.json(value);
+const latestManifest = repo + "/releases/latest/download/whalelife-update.json";
+const taggedManifest = repo + "/releases/download/v" + version + "/whalelife-update.json";
+const manifest = { format: 1, version, size: 100, sha256: "a".repeat(64) };
+function withManifest(reply: () => Response): typeof fetch {
+  return async input => {
+    if (String(input) === latestManifest) return Response.redirect(taggedManifest);
+    assert.equal(String(input), taggedManifest);
+    return reply();
+  };
+}
 const release = (bytes: Buffer) => ({ version, url, size: bytes.length, digest: createHash("sha256").update(bytes).digest("hex") });
 const builder = fileURLToPath(new URL("../tools/build-host-release.mjs", import.meta.url));
 
-test("release checks accept only newer official, stable, digest-pinned host assets", async () => {
+test("release checks read a tag-bound manifest from GitHub release assets and compare numeric versions", async () => {
+  const cdn = "https://release-assets.githubusercontent.com/example";
+  const visited: string[] = [];
+  let signal: AbortSignal | null | undefined;
   const found = await latestHostRelease("0.9.30", async (input, init) => {
-    assert.equal(String(input), "https://api.github.com/repos/iinukami/whalelife/releases/latest");
-    assert.equal(init?.redirect, "error");
-    return Response.json(metadata);
+    const address = String(input);
+    visited.push(address);
+    assert.equal(init?.redirect, "manual");
+    assert.equal(init?.credentials, "omit");
+    assert.equal(init?.referrerPolicy, "no-referrer");
+    assert.ok(init?.signal);
+    signal ??= init.signal;
+    assert.equal(init.signal, signal);
+    if (address === latestManifest) return new Response(null, { status: 302, headers: { location: new URL(taggedManifest).pathname } });
+    if (address === taggedManifest) return Response.redirect(cdn);
+    assert.equal(address, cdn);
+    return Response.json(manifest);
   });
   assert.deepEqual(found, { version, url, digest: "a".repeat(64), size: 100 });
-  assert.equal(await latestHostRelease("0.10.0", jsonResponse(metadata)), null);
-  assert.equal(await latestHostRelease("1.0.0", jsonResponse(metadata)), null);
-  assert.equal(await latestHostRelease("0.1.0", async () => new Response(null, { status: 404 })), null);
-  for (const flag of ["draft", "prerelease"]) assert.equal(await latestHostRelease("0.1.0", jsonResponse({ ...metadata, [flag]: true })), null);
-  for (const overrides of [{ digest: null }, { digest: "sha256:no" }, { size: 0 }, { browser_download_url: repo }])
-    await assert.rejects(latestHostRelease("0.1.0", jsonResponse({ ...metadata, assets: [{ ...metadata.assets[0], ...overrides }] })));
-  await assert.rejects(latestHostRelease("0.1.0", async () => new Response(null, { status: 503 })), /503/);
+  assert.deepEqual(visited, [latestManifest, taggedManifest, cdn]);
+  for (const current of [version, "1.0.0"])
+    assert.equal(await latestHostRelease(current, withManifest(() => Response.json(manifest))), null);
+});
+
+test("missing, malformed or unpinned manifests cannot supply a host update or confirm it is current", async () => {
+  for (const status of [404, 503]) {
+    const reply = () => new Response(null, { status });
+    for (const request of [async () => reply(), withManifest(reply)])
+      await assert.rejects(latestHostRelease(version, request), status === 404 ? /缺少更新清单/ : /503/);
+  }
+  for (const overrides of [
+    { format: 2 }, { version: "0.9.0" }, { size: 0 }, { size: 40 * 1024 ** 2 + 1 },
+    { sha256: "bad digest" }, { sha256: [manifest.sha256] }, { downloadURL: assetURL },
+  ]) await assert.rejects(latestHostRelease(version, withManifest(() => Response.json({ ...manifest, ...overrides }))));
+  await assert.rejects(latestHostRelease(version, withManifest(() => new Response("not JSON"))), /清单 JSON/);
+  await assert.rejects(latestHostRelease(version, withManifest(() => new Response(" ".repeat(16 * 1024 + 1)))), /大小上限/);
+  await assert.rejects(latestHostRelease(version, async () => Response.json(manifest)), /标签/);
+  for (const location of [
+    taggedManifest.replace("v0.10.0", "v0.10.0-beta.1"), taggedManifest.replace("/iinukami/", "/other-owner/"),
+    assetURL, "https://release-assets.githubusercontent.com/example",
+  ]) await assert.rejects(latestHostRelease(version, async input => {
+    assert.equal(String(input), latestManifest);
+    return Response.redirect(location);
+  }), /正式版本标签/);
+  await assert.rejects(latestHostRelease(version, withManifest(() => Response.redirect("https://example.org/file"))), /跳转/);
 });
 
 test("GitHub release checks distinguish rate limits from other forbidden responses", async t => {
@@ -104,9 +142,19 @@ test("build two identical releases from tracked source and extract a working ind
   await mkdir(unpacked);
   await writeFile(join(source, "core", "private-local-file.ts"), "private");
   await mkdir(join(source, "config")); await writeFile(join(source, "config/config.json"), "private");
-  for (const out of [out1, out2]) execFileSync(process.execPath, [builder, out, source]);
+  for (const out of [out1, out2]) {
+    const report = JSON.parse(execFileSync(process.execPath, [builder, out, source], { encoding: "utf8" }));
+    assert.equal(report.path, join(out, filename));
+    assert.equal(report.manifestPath, join(out, "whalelife-update.json"));
+    const bytes = await readFile(report.path);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    assert.deepEqual(JSON.parse(await readFile(report.manifestPath, "utf8")), { format: 1, version, size: bytes.length, sha256 });
+    assert.equal(report.sha256, sha256);
+    assert.equal(report.size, bytes.length);
+  }
   const bytes = await readFile(join(out1, filename));
   assert.deepEqual(bytes, await readFile(join(out2, filename)));
+  assert.deepEqual(await readFile(join(out1, "whalelife-update.json")), await readFile(join(out2, "whalelife-update.json")));
   await stageHostRelease(release(bytes), unpacked, async (input, init) => {
     assert.equal(init?.redirect, "manual");
     if (String(input) === assetURL) return Response.redirect("https://release-assets.githubusercontent.com/sample");
@@ -117,6 +165,20 @@ test("build two identical releases from tracked source and extract a working ind
   assert(!(await readdir(unpacked)).includes("config"));
   assert.equal(execFileSync(process.execPath, [join(unpacked, "core/index.ts")], { encoding: "utf8" }).trim(), "healthy");
   await assert.rejects(stageHostRelease(release(bytes), unpacked), /空的暂存目录/);
+});
+
+test("a conflicting release asset is preserved without leaving a mismatched companion", async () => {
+  const root = await temporaryDirectory("whale-host-release-collision-");
+  const source = await prepareSource(root, version);
+  for (const [index, existing] of ["whalelife-update.json", filename].entries()) {
+    const out = join(root, "out-" + index);
+    await mkdir(out);
+    await writeFile(join(out, existing), "previous asset");
+    const result = spawnSync(process.execPath, [builder, out, source], { encoding: "utf8" });
+    assert.equal(result.status, 1);
+    assert.deepEqual(await readdir(out), [existing]);
+    assert.equal(await readFile(join(out, existing), "utf8"), "previous asset");
+  }
 });
 
 test("ordinary builds reject diverging versions in either lockfile field before writing a bundle", async () => {
@@ -181,7 +243,9 @@ test("release builds use a committed main revision and a version above the deplo
   const report = JSON.parse(success.stdout);
   assert.equal(report.tag, "v" + version);
   assert.equal(report.commit, commit);
-  assert.ok((await readFile(join(root, "successful", filename))).length > 0);
+  const archive = await readFile(join(root, "successful", filename));
+  const manifest = JSON.parse(await readFile(join(root, "successful", "whalelife-update.json"), "utf8"));
+  assert.deepEqual(manifest, { format: 1, version, size: archive.length, sha256: createHash("sha256").update(archive).digest("hex") });
   assert.equal(git(remote, "show-ref"), refs);
   git(remote, "update-ref", "refs/tags/v" + version, commit);
   await rejected();
