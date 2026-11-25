@@ -12,7 +12,7 @@ WhaleLife is a self-hosted AI companion framework built around continuity of sel
 
 ![Illustrated example of continuing one conversation between QQ and the web console](architecture/assets/conversation-continuity.svg)
 
-*Illustrated example with fictional dialogue. To continue a conversation across QQ and the web console, install and configure the QQ plugin and use the same session. Set QQ to follow the core persona if you want the same persona in both interfaces. Separate sessions keep their own history by default.*
+*Illustrated example with fictional dialogue. To continue a conversation across QQ and the web console, install and configure the QQ plugin and use the same session. QQ uses the persona selected in the core. Separate sessions keep their own history by default.*
 
 Tell your companion about a book on QQ, then return to the web console and continue talking about it. With both interfaces connected to the same session, that earlier exchange remains part of the conversation. Add web browsing later, and the same companion can use it to look something up. A new plugin adds a capability around the existing persona and history.
 
