@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="570" viewBox="0 0 1200 570" role="img" aria-labelledby="title desc">
+  <title id="title">WhaleLife · 经历延续，能力生长 / One companion, growing abilities</title>
+  <desc id="desc">虚构对话示意。用户先在 QQ 提到周六去海边、带相机，随后在网页中继续询问。需要安装 QQ 插件并配置为使用同一会话。Illustrated example with fictional dialogue; requires the QQ plugin and the same session.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f7f5ff"/><stop offset="1" stop-color="#f4f8ff"/></linearGradient>
+    <linearGradient id="purple" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#7767ea"/><stop offset="1" stop-color="#594aca"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="1198" height="568" rx="28" fill="url(#bg)" stroke="#e6e2f3" stroke-width="2"/>
+  <g font-family="Inter,Segoe UI,Microsoft YaHei,PingFang SC,sans-serif">
+    <text x="42" y="57" fill="#2d2944" font-size="28" font-weight="700">经历延续，能力生长</text>
+    <text x="42" y="87" fill="#726b87" font-size="18">One companion. Growing abilities. A continuing story.</text>
+    <rect x="873" y="30" width="285" height="36" rx="18" fill="#ebe7fa"/>
+    <text x="1015" y="54" text-anchor="middle" fill="#62558d" font-size="15">对话示意 · Illustrated example</text>
+
+    <rect x="42" y="123" width="420" height="345" rx="20" fill="#fff" stroke="#e4e0ee"/>
+    <rect x="66" y="146" width="42" height="42" rx="13" fill="#eeeafb"/>
+    <text x="87" y="173" text-anchor="middle" fill="#6a58cf" font-size="17" font-weight="700">QQ</text>
+    <text x="121" y="164" fill="#302a45" font-size="20" font-weight="700">先在 QQ 聊</text>
+    <text x="121" y="187" fill="#898195" font-size="15">Start on QQ</text>
+    <line x1="66" y1="207" x2="438" y2="207" stroke="#eeeaf4"/>
+    <text x="88" y="242" fill="#8b829e" font-size="14">你 / You</text>
+    <rect x="66" y="253" width="372" height="96" rx="15" fill="#f0ecfc"/>
+    <text x="88" y="287" fill="#3d335b" font-size="20">周六想去海边，记得带相机。</text>
+    <text x="88" y="318" fill="#7c7194" font-size="15">Saturday: the beach. Bring the camera.</text>
+    <text x="88" y="389" fill="#756b8d" font-size="17">这段交流，留在同一会话里。</text>
+    <text x="88" y="417" fill="#948ba4" font-size="15">The conversation stays in this session.</text>
+
+    <path d="M475 282h12m210 0h14" fill="none" stroke="#b3a6df" stroke-width="3" stroke-linecap="round"/>
+    <path d="m704 276 7 6-7 6" fill="none" stroke="#b3a6df" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="480" y="217" width="224" height="136" rx="22" fill="url(#purple)"/>
+    <text x="592" y="250" text-anchor="middle" fill="#fff" font-size="23" font-weight="700">同一个 AI</text>
+    <text x="592" y="277" text-anchor="middle" fill="#e5defd" font-size="15">One companion</text>
+    <text x="592" y="310" text-anchor="middle" fill="#fff" font-size="16">人格 · 会话 · 记忆</text>
+    <text x="592" y="332" text-anchor="middle" fill="#e5defd" font-size="15">Persona · Session · Memory</text>
+    <path d="M592 353v25" fill="none" stroke="#b3a6df" stroke-width="2"/>
+    <rect x="480" y="378" width="224" height="66" rx="14" fill="#ebe6fb" stroke="#d9cff4"/>
+    <text x="592" y="403" text-anchor="middle" fill="#6c58a3" font-size="18">插件扩展能力</text>
+    <text x="592" y="427" text-anchor="middle" fill="#81719f" font-size="15">Chat · See · Hear · Act</text>
+
+    <rect x="722" y="123" width="436" height="345" rx="20" fill="#fff" stroke="#e4e0ee"/>
+    <rect x="746" y="146" width="42" height="42" rx="13" fill="#eaf0fb"/>
+    <rect x="755" y="156" width="24" height="18" rx="3" fill="none" stroke="#6581b8" stroke-width="2"/>
+    <path d="M760 179h14m-7-5v5" fill="none" stroke="#6581b8" stroke-width="2" stroke-linecap="round"/>
+    <text x="801" y="164" fill="#302a45" font-size="20" font-weight="700">回到网页，继续聊</text>
+    <text x="801" y="187" fill="#898195" font-size="15">Continue in the web console</text>
+    <line x1="746" y1="207" x2="1134" y2="207" stroke="#eeeaf4"/>
+    <rect x="784" y="227" width="350" height="83" rx="15" fill="#f0ecfc"/>
+    <text x="804" y="259" fill="#3d335b" font-size="20">刚才说周六去哪来着？</text>
+    <text x="804" y="286" fill="#7c7194" font-size="15">Where did we say we'd go on Saturday?</text>
+    <rect x="746" y="330" width="354" height="102" rx="15" fill="#f4f5fa"/>
+    <text x="768" y="361" fill="#7963c4" font-size="14" font-weight="600">鲸鲸 / Jingjing</text>
+    <text x="768" y="391" fill="#383449" font-size="20">去海边，带上相机。</text>
+    <text x="768" y="416" fill="#898195" font-size="15">The beach — and bring your camera.</text>
+
+    <text x="42" y="510" fill="#6a607e" font-size="17">需要 QQ 插件，并将 QQ 与网页配置为使用同一会话。</text>
+    <text x="42" y="538" fill="#8a809b" font-size="15">Requires the QQ plugin and both channels configured to use the same session. Fictional dialogue.</text>
+  </g>
+</svg>
