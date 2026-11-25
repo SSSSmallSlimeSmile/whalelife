@@ -399,3 +399,150 @@ test("渠道不明或形状太短的，一律不当补充", () => {
   ]);
   assert.equal(tooShort, 3, "不是我们生成的那种形状就别猜");
 });
+
+// ── 翻页交互（作者在 PR #39 上报的第 2 条）──────────────────────────────
+// 点一次「更早」，要真的落到提示的那一批。旧写法里 syncRail 认为「高亮在批外就该换批」，
+// 而平滑滚动途中高亮还在末尾，于是刚翻过去的批次当场被拽回来，看着像点了没反应。
+
+function ticksOf(rail: FakeNode) {
+  return (rail as any).__ticks as FakeNode[];
+}
+
+function railWithTicks() {
+  const rail = new FakeNode({ clientHeight: 500 });
+  (rail as any).__ticks = [];
+  Object.defineProperty(rail, "innerHTML", {
+    get() {
+      return (this as any).__html || "";
+    },
+    set(value: string) {
+      (this as any).__html = value;
+      const list: FakeNode[] = [];
+      const re = /<button[^>]*>/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(String(value)))) {
+        const tag = m[0];
+        if (!tag.includes("chat-rail-tick")) continue;
+        const node = new FakeNode();
+        const page = /data-page="([^"]*)"/.exec(tag);
+        const turn = /data-turn="([^"]*)"/.exec(tag);
+        const ordinal = /data-ordinal="([^"]*)"/.exec(tag);
+        if (page) node.dataset.page = page[1];
+        if (turn) node.dataset.turn = turn[1];
+        if (ordinal) node.dataset.ordinal = ordinal[1];
+        node.classList.toggle = (name: string, on?: boolean) => {
+          if (on) node.classes.add(name);
+          else node.classes.delete(name);
+        };
+        node.style = {};
+        list.push(node);
+      }
+      (this as any).__ticks = list;
+    },
+  });
+  rail.querySelectorAll = (sel: string) => {
+    const all = (rail as any).__ticks as FakeNode[];
+    if (sel.includes("[data-turn]")) return all.filter((t) => t.dataset.turn !== undefined);
+    return all;
+  };
+  return rail;
+}
+
+/** 造一个能算高亮的消息容器：第 n 条消息离视口顶端 (n - cursor) * 20px。 */
+function scrollableMessages(cursor: { at: number }) {
+  const box = new FakeNode({ clientHeight: 500 });
+  box.getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0, right: 1000, width: 1000, height: 500 });
+  box.querySelector = (sel: string) => {
+    const m = /data-index="(\d+)"/.exec(sel);
+    if (!m) return null;
+    const index = Number(m[1]);
+    return {
+      isConnected: true,
+      scrollIntoView() {},
+      getBoundingClientRect() {
+        const top = (index - cursor.at) * 20;
+        return { top, bottom: top + 20, height: 20, width: 100, left: 0, right: 100 };
+      },
+    };
+  };
+  return box;
+}
+
+function longSession() {
+  const cursor = { at: 152 };
+  const railEl = railWithTicks();
+  const messages = scrollableMessages(cursor);
+  const app = rail({ messages, "chat-rail": railEl });
+  const rows: any[] = [];
+  for (let i = 0; i < 80; i += 1) {
+    rows.push({ role: "user", text: "问" + i });
+    rows.push({ role: "assistant", text: "答" + i });
+  }
+  app.state.messages = rows;
+  app.renderOutline();
+  return { app, rail: railEl, cursor };
+}
+
+test("点一次「更早」就落到提示的那一批，不会被拽回末尾", () => {
+  const { app, rail, cursor } = longSession();
+  const batch = app.railBatch;
+  assert.ok(batch >= 8, "一批的格数按轨道高度算");
+  assert.equal(app.railStart, 80 - batch, "首屏停在最新一批");
+
+  // 平滑滚动刚开始：高亮还在最后一轮，旧写法这里就会把批次拽回末尾
+  cursor.at = 152;
+  app.syncRail();
+  assert.equal(app.railStart, 80 - batch, "滚动还没动时，批次不能变");
+
+  app.railPage("prev");
+  assert.equal(app.railStart, 80 - batch * 2, "点一次「更早」走一整批");
+  const firstTurn = Number(ticksOf(rail).filter((t) => t.dataset.turn !== undefined)[0].dataset.turn);
+  assert.equal(firstTurn, 80 - batch * 2, "刻度上的第一格就是这一批的第一轮");
+
+  // 滚动途中，高亮还在末尾附近
+  cursor.at = 150;
+  app.syncRail();
+  assert.equal(app.railStart, 80 - batch * 2, "滚动途中高亮在批外，不许把批次弹回末尾");
+
+  // 再滚一段，仍在批外
+  cursor.at = 100;
+  app.syncRail();
+  assert.equal(app.railStart, 80 - batch * 2, "中途任何一度都不许弹回");
+
+  // 落到目标那一批：第 start 轮的消息索引是 start*2，视口顶端落在它上面
+  cursor.at = (80 - batch * 2) * 2 - 6;
+  app.syncRail();
+  assert.equal(app.railStart, 80 - batch * 2, "到位后批次不变");
+  const active = ticksOf(rail).filter((t) => t.classes.has("active"));
+  assert.equal(active.length, 1, "高亮只留一格");
+  assert.equal(Number(active[0].dataset.turn), 80 - batch * 2, "高亮在那一批的第一格");
+});
+
+test("翻页过头之后，用户自己滚到别处，批次照常跟着换", () => {
+  const { app, cursor } = longSession();
+  app.railPage("prev");
+  const landed = app.railStart;
+  // 落到位，解除主动跳转
+  cursor.at = landed * 2;
+  app.syncRail();
+  // 再往上滚很远（滚出这一批）
+  cursor.at = 10;
+  app.syncRail();
+  assert.notEqual(app.railStart, landed, "解除之后，滚动越界就换批，不能钉死");
+  assert.ok(app.railStart <= 12, "换到高亮所在的那一批");
+});
+
+test("跳到最新那一格，期间也不被中途的滚动打断", () => {
+  const { app, cursor } = longSession();
+  app.railPage("prev");
+  app.railPage("prev");
+  const early = app.railStart;
+  assert.ok(early < 80 - app.railBatch, "已经翻到更早的批次");
+  cursor.at = early * 2;
+  app.syncRail();
+  app.railPage("latest");
+  assert.equal(app.railStart, 80 - app.railBatch, "跳到最新，回到末尾那一批");
+  cursor.at = 90;
+  app.syncRail();
+  assert.equal(app.railStart, 80 - app.railBatch, "途中不许换批");
+});

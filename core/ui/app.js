@@ -684,7 +684,10 @@ class ConsoleApp {
       this.railPinned = true;
       this.railStart = Math.max(0, total - size);
       this.hideRailCard();
+      // renderOutline 内部会调一次 syncRail，那时高亮还在末尾：保护要先挂上，否则当场被判成「滚回最新」。
+      this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + 3000 };
       this.renderOutline();
+      this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + 3000 };
       this.jumpToTurn(total - 1);
       return;
     }
@@ -694,8 +697,13 @@ class ConsoleApp {
     this.railPinned = false;
     this.railStart = Math.max(0, Math.min(start, Math.max(0, total - size)));
     this.hideRailCard();
+    // renderOutline 内部会调一次 syncRail，那一下高亮还在末尾：保护要先挂上，否则当场被判定成「滚回最新」，
+    // 批次一路弹回末尾——点一次「更早」看着没反应（作者在 PR #39 上报的第 2 条，勘 2026-11-26 修）。
+    this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + 3000 };
     this.renderOutline();
-    // 翻完要落到那一批的头一格（往前）或末一格（往后），否则刻度换了、消息停在原处（勘 2026-11-25 修）
+    // 翻完要落到那一批的头一格（往前）或末一格（往后），否则刻度换了、消息停在原处（勘 2026-11-25 修）。
+    // 平滑滚动途中高亮仍在批外（甚至还在末尾），这段时间同样不许换批。
+    this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + 3000 };
     this.jumpToTurn(
       dir === "prev" ? this.railStart : Math.min(total - 1, this.railStart + (this.railBatch || 48) - 1),
     );
@@ -897,6 +905,17 @@ class ConsoleApp {
       if (rect.top <= head) active = i;
     });
     if (active < 0) return;
+    // 主动翻页后的平滑滚动期间，高亮还在批外（甚至还在末尾）：这段时间不许换批，也不许「滚回最新」。
+    // 否则点一下「更早」立刻被弹回末尾，看着像导航失灵（勘 2026-11-26 修）。
+    const jump = this.railJump;
+    if (jump) {
+      if (Date.now() > jump.until) this.railJump = null;
+      else if (active >= jump.from && active < jump.to) this.railJump = null;
+      else {
+        turnTicks.forEach((tick) => tick.classList.remove("active"));
+        return;
+      }
+    }
     // 手动翻页后用户又滚回最新那条了：重新跟随最新，新消息进来才知道要往末尾走（勘 2026-11-25 修）
     if (!this.railPinned && active >= turns.length - 1) {
       this.railPinned = true;
