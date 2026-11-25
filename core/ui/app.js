@@ -808,6 +808,22 @@ class ConsoleApp {
     const box = $("messages");
     if (!rail || !box || rail.hidden) return;
     if (document.hidden || box.clientHeight < 1 || rail.clientHeight < 1) return;
+    // 输入区变高（贴了图、草稿多行）会把聊天区压矮，可窗口尺寸没变、也没滚动，
+    // 上面那些监听一个都不会来；刻度还按旧高度排的 top，就溢出到输入框下面去了（勘 2026-11-25 修）。
+    if (this.railHeightEl !== rail) {
+      if (this.railHeightObs) this.railHeightObs.disconnect();
+      this.railHeightEl = rail;
+      this.railHeightH = rail.clientHeight;
+      if (typeof ResizeObserver === "function") {
+        this.railHeightObs = new ResizeObserver(() => {
+          const h = rail.clientHeight;
+          if (!h || Math.abs(h - (this.railHeightH || 0)) < 2) return;
+          this.railHeightH = h;
+          this.scheduleRail();
+        });
+        this.railHeightObs.observe(rail);
+      }
+    }
     const turns = this.railTurns || [];
     // 窗口尺寸一变，一批能放几格也跟着变；差到两格以上就按新的一批重画（勘 2026-11-25）。
     if (Math.abs(this.railBatchSize() - (this.railBatch || 0)) >= 2) {

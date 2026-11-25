@@ -2364,6 +2364,7 @@ dialog::backdrop {
   flex: 0 0 var(--rail-w);
   width: var(--rail-w);
   margin: 10px 0 12px 4px;
+  overflow: hidden;
   transition: flex-basis 0.22s ease, width 0.22s ease;
 }
 .chat-rail[hidden] {
