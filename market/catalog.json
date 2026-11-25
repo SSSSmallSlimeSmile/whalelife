@@ -403,17 +403,27 @@
     },
     {
       "id": "discord",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "name": "Discord 文字聊天",
       "author": "Tawake1",
       "description": "让鲸鲸在 Discord 私信、频道和讨论串中聊天，支持引用回复、绑定网页会话、频道暂停和可选图片识别。",
       "repository": "https://github.com/Tawake1/whalelife-plugin-discord",
-      "installation": "https://github.com/Tawake1/whalelife-plugin-discord/blob/db5c118c219fbd56ed8953b102ecbabaf634294a/README.md#安装",
+      "installation": "https://github.com/Tawake1/whalelife-plugin-discord/blob/b0c4b206f927ae83a951f20ade1fdca2b1a9fabf/README.md#安装",
       "feedback": "https://github.com/Tawake1/whalelife-plugin-discord/issues",
       "dependencies": [],
       "collected": "2026-11-23",
       "stars": 0,
       "verifiedReleases": [
+        {
+          "version": "0.6.0",
+          "hostRange": "0.1.1",
+          "platform": "win32",
+          "arch": "x64",
+          "dependencies": {},
+          "assetUrl": "https://github.com/Tawake1/whalelife-plugin-discord/releases/download/v0.6.0/discord-0.6.0.wlpkg.gz",
+          "sizeBytes": 3362138,
+          "sha256": "5d3017bff3f0e655fa50454b419ad423db51ae26e4cb33685553f3029af905e6"
+        },
         {
           "version": "0.5.1",
           "hostRange": ">=0.1.1 <=0.1.2",
@@ -448,6 +458,31 @@
           "assetUrl": "https://github.com/SSSSmallSlimeSmile/whalelife-plugin-chime/releases/download/v0.3.0/chime-0.3.0.wlpkg.gz",
           "sha256": "d0f49f302a2eb3f908a1eb7887b41c6dca73020c88b758c4d23c4f3546beab47",
           "sizeBytes": 217758
+        }
+      ]
+    },
+    {
+      "id": "ledger",
+      "version": "0.2.3",
+      "name": "账本",
+      "author": "SSSSmallSlimeSmile",
+      "description": "按天统计模型请求用量，并与宿主账本只读对账。",
+      "repository": "https://github.com/SSSSmallSlimeSmile/whalelife-plugin-ledger",
+      "installation": "https://github.com/SSSSmallSlimeSmile/whalelife-plugin-ledger/blob/8ea562a7a5a4639ab2dab29dfe983af2adffeaff/README.md",
+      "feedback": "https://github.com/SSSSmallSlimeSmile/whalelife-plugin-ledger/issues",
+      "dependencies": [],
+      "collected": "2026-11-25",
+      "stars": 0,
+      "verifiedReleases": [
+        {
+          "version": "0.2.3",
+          "hostRange": "0.1.3",
+          "platform": "win32",
+          "arch": "x64",
+          "assetUrl": "https://github.com/SSSSmallSlimeSmile/whalelife-plugin-ledger/releases/download/v0.2.3/ledger-0.2.3.wlpkg.gz",
+          "sizeBytes": 28520,
+          "sha256": "ca905968215de6056d22d7a807d9ec560889ef04a244b562fcd2a72cb7885647",
+          "dependencies": {}
         }
       ]
     }
