@@ -56,6 +56,7 @@ const patched = toScript(raw);
 
 class FakeNode {
   dataset: Record<string, string> = {};
+  onclick?: () => void;
   clientHeight = 0;
   scrollHeight = 0;
   scrollTop = 0;
@@ -69,21 +70,31 @@ class FakeNode {
     add: (name: string) => this.classes.add(name),
     remove: (name: string) => this.classes.delete(name),
     contains: (name: string) => this.classes.has(name),
-    toggle: () => undefined,
+    toggle: (_name: string, _on?: boolean): void => undefined,
   };
   constructor(attrs: Partial<FakeNode> & { dataset?: Record<string, string> } = {}) {
     Object.assign(this, attrs);
   }
-  addEventListener() {}
-  removeEventListener() {}
+  listeners: Record<string, ((ev: unknown) => void)[]> = {};
+  addEventListener(type: string, fn: (ev: unknown) => void) {
+    (this.listeners[type] ||= []).push(fn);
+  }
+  removeEventListener(type: string, fn: (ev: unknown) => void) {
+    const list = this.listeners[type];
+    if (list) this.listeners[type] = list.filter((one) => one !== fn);
+  }
+  /** 手动触发一次事件：用来验 scrollend 这类浏览器自己发的信号。 */
+  fire(type: string) {
+    for (const fn of [...(this.listeners[type] || [])]) fn({ type });
+  }
   appendChild() {}
   getBoundingClientRect() {
     return { top: 0, bottom: 20, left: 0, right: 20, width: 200, height: 60 };
   }
-  querySelectorAll() {
+  querySelectorAll(_sel?: string): FakeNode[] {
     return [];
   }
-  querySelector() {
+  querySelector(_sel?: string): any {
     return null;
   }
 }
@@ -442,14 +453,14 @@ function railWithTicks() {
   });
   rail.querySelectorAll = (sel: string) => {
     const all = (rail as any).__ticks as FakeNode[];
-    if (sel.includes("[data-turn]")) return all.filter((t) => t.dataset.turn !== undefined);
+    if (sel === ".chat-rail-tick[data-turn]") return all.filter((t) => t.dataset.turn !== undefined);
     return all;
   };
   return rail;
 }
 
 /** 造一个能算高亮的消息容器：第 n 条消息离视口顶端 (n - cursor) * 20px。 */
-function scrollableMessages(cursor: { at: number }) {
+function scrollableMessages(cursor: { at: number }, jumps: { index: number; options: ScrollIntoViewOptions }[]) {
   const box = new FakeNode({ clientHeight: 500 });
   box.getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0, right: 1000, width: 1000, height: 500 });
   box.querySelector = (sel: string) => {
@@ -458,7 +469,9 @@ function scrollableMessages(cursor: { at: number }) {
     const index = Number(m[1]);
     return {
       isConnected: true,
-      scrollIntoView() {},
+      scrollIntoView(options: ScrollIntoViewOptions) {
+        jumps.push({ index, options });
+      },
       getBoundingClientRect() {
         const top = (index - cursor.at) * 20;
         return { top, bottom: top + 20, height: 20, width: 100, left: 0, right: 100 };
@@ -468,25 +481,28 @@ function scrollableMessages(cursor: { at: number }) {
   return box;
 }
 
-function longSession() {
+function longSession(total = 80, batch?: number) {
   const cursor = { at: 152 };
+  const jumps: { index: number; options: ScrollIntoViewOptions }[] = [];
   const railEl = railWithTicks();
-  const messages = scrollableMessages(cursor);
-  const app = rail({ messages, "chat-rail": railEl });
+  const messages = scrollableMessages(cursor, jumps);
+  const card = new FakeNode();
+  const app = rail({ messages, "chat-rail": railEl, "chat-rail-card": card });
+  if (batch !== undefined) app.railBatchSize = () => batch;
   const rows: any[] = [];
-  for (let i = 0; i < 80; i += 1) {
+  for (let i = 0; i < total; i += 1) {
     rows.push({ role: "user", text: "问" + i });
     rows.push({ role: "assistant", text: "答" + i });
   }
   app.state.messages = rows;
   app.renderOutline();
-  return { app, rail: railEl, cursor };
+  return { app, rail: railEl, cursor, card, jumps, messages };
 }
 
 test("点一次「更早」就落到提示的那一批，不会被拽回末尾", () => {
-  const { app, rail, cursor } = longSession();
+  const { app, rail, cursor, card, jumps } = longSession();
   const batch = app.railBatch;
-  assert.ok(batch >= 8, "一批的格数按轨道高度算");
+  assert.equal(batch, 28, "500px 轨道的一批是 28 格");
   assert.equal(app.railStart, 80 - batch, "首屏停在最新一批");
 
   // 平滑滚动刚开始：高亮还在最后一轮，旧写法这里就会把批次拽回末尾
@@ -494,7 +510,15 @@ test("点一次「更早」就落到提示的那一批，不会被拽回末尾",
   app.syncRail();
   assert.equal(app.railStart, 80 - batch, "滚动还没动时，批次不能变");
 
-  app.railPage("prev");
+  const prev = ticksOf(rail).find((tick) => tick.dataset.page === "prev");
+  assert.ok(prev?.onclick);
+  app.showRailCard(prev);
+  assert.match(card.innerHTML, /已加载第 25–52 轮/);
+  prev.onclick();
+  assert.equal(jumps.length, 1);
+  assert.equal(jumps[0].index, 48, "向前翻页滚到第 25 轮的提问");
+  assert.equal(jumps[0].options.block, "start");
+  assert.equal(jumps[0].options.behavior, "smooth");
   assert.equal(app.railStart, 80 - batch * 2, "点一次「更早」走一整批");
   const firstTurn = Number(ticksOf(rail).filter((t) => t.dataset.turn !== undefined)[0].dataset.turn);
   assert.equal(firstTurn, 80 - batch * 2, "刻度上的第一格就是这一批的第一轮");
@@ -516,6 +540,30 @@ test("点一次「更早」就落到提示的那一批，不会被拽回末尾",
   const active = ticksOf(rail).filter((t) => t.classes.has("active"));
   assert.equal(active.length, 1, "高亮只留一格");
   assert.equal(Number(active[0].dataset.turn), 80 - batch * 2, "高亮在那一批的第一格");
+
+  const next = ticksOf(rail).find((tick) => tick.dataset.page === "next");
+  assert.ok(next?.onclick);
+  app.showRailCard(next);
+  assert.match(card.innerHTML, /已加载第 53–80 轮/);
+  next.onclick();
+  assert.equal(app.railStart, 52);
+  assert.equal(jumps.length, 2);
+  assert.equal(jumps[1].index, 158, "向后翻页滚到第 80 轮的提问");
+});
+
+test("刚好一批时没有翻页入口，单格批次按一轮往返", () => {
+  const exact = longSession(28);
+  assert.equal(ticksOf(exact.rail).length, 28);
+  assert.ok(ticksOf(exact.rail).every((tick) => tick.dataset.page === undefined));
+  assert.equal(ticksOf(longSession(1).rail).length, 0);
+
+  const { app, rail, jumps } = longSession(80, 1);
+  app.railPage("prev");
+  assert.deepEqual(ticksOf(rail).flatMap((tick) => tick.dataset.turn ?? []), ["78"]);
+  assert.equal(jumps[0].index, 156);
+  app.railPage("next");
+  assert.deepEqual(ticksOf(rail).flatMap((tick) => tick.dataset.turn ?? []), ["79"]);
+  assert.equal(jumps[1].index, 158);
 });
 
 test("翻页过头之后，用户自己滚到别处，批次照常跟着换", () => {
@@ -545,4 +593,80 @@ test("跳到最新那一格，期间也不被中途的滚动打断", () => {
   cursor.at = 90;
   app.syncRail();
   assert.equal(app.railStart, 80 - app.railBatch, "途中不许换批");
+});
+
+test("顶格有「载入更早」入口：拉到新历史后，刻度停在原来那一批", async () => {
+  const { app, rail, card, cursor } = longSession();
+  app.state.paging = { total: 240, start: 120, end: 200, hasMore: true };
+  app.railPinned = false;
+  app.railStart = 0;
+  cursor.at = 0; // 用户正停在最早那一批，末尾不是他的位置
+  app.renderOutline();
+
+  const older = ticksOf(rail).find((tick) => tick.dataset.page === "older");
+  assert.ok(older, "已经在最早一批、服务端还有更早的，顶格要给入口");
+  app.showRailCard(older!);
+  assert.match(card.innerHTML, /载入更早的历史/);
+  const firstTurn = () => Number(ticksOf(rail).filter((t) => t.dataset.turn !== undefined)[0].dataset.turn);
+  assert.equal(firstTurn(), 0, "点之前刻度从第 0 轮起");
+
+  // 假 loadOlder：往前塞 4 轮，并像真实现那样重排
+  app.loadOlder = async () => {
+    const rows: any[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      rows.push({ role: "user", text: "更早" + i });
+      rows.push({ role: "assistant", text: "早答" + i });
+    }
+    app.state.messages = rows.concat(app.state.messages);
+    app.renderOutline();
+  };
+
+  await app.railLoadOlder();
+  assert.equal(app.railStart, 4, "批次跟着后移，还停在同一批对话上");
+  assert.equal(firstTurn(), 4, "刻度第一格就是原来那一轮");
+
+  // 已经没有更早的了，入口要收起来
+  app.state.paging = { total: 240, start: 0, end: 200, hasMore: false };
+  app.railPinned = false;
+  app.railStart = 0;
+  cursor.at = 0;
+  app.renderOutline();
+  assert.equal(
+    ticksOf(rail).find((tick) => tick.dataset.page === "older"),
+    undefined,
+    "hasMore 为 false 时不能再挂一个点了没用的入口",
+  );
+});
+
+test("拉到更早的历史之后，轮号按新增的轮数整体后移", async () => {
+  const { app, rail, cursor } = longSession();
+  app.state.paging = { total: 240, start: 120, end: 200, hasMore: true };
+  app.railPinned = false;
+  app.railStart = 0;
+  cursor.at = 0;
+  app.renderOutline();
+  const before = ticksOf(rail).filter((t) => t.dataset.turn !== undefined).length;
+  assert.ok(before > 0);
+
+  app.loadOlder = async () => {
+    const rows: any[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      rows.push({ role: "user", text: "更早" + i });
+      rows.push({ role: "assistant", text: "早答" + i });
+    }
+    app.state.messages = rows.concat(app.state.messages);
+    app.renderOutline();
+  };
+  await app.railLoadOlder();
+  const ticks = ticksOf(rail).filter((t) => t.dataset.turn !== undefined);
+  assert.equal(Number(ticks[0].dataset.turn), 3, "原来的第 0 轮，现在是第 3 轮");
+});
+
+test("程序滚动结束（scrollend）就撤掉保护，不必等超时", () => {
+  const { app, messages } = longSession();
+  app.railPage("prev");
+  assert.ok(app.railJump, "翻页时挂上保护");
+  assert.equal(messages.listeners.scrollend?.length ?? 0, 1, "要在消息区上等 scrollend");
+  messages.fire("scrollend");
+  assert.equal(app.railJump, null, "滚动一结束就撤，慢设备上不会被超时兜着弹回末尾");
 });

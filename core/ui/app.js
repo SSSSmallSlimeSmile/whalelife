@@ -640,6 +640,11 @@ class ConsoleApp {
       html +=
         '<button type="button" class="chat-rail-tick chat-rail-page" data-page="prev" aria-label="更早的 ' +
         start + ' 轮"><i></i></button>';
+    } else if (this.state.paging && this.state.paging.hasMore) {
+      // 已经在最早那一批，但服务端还有更早的历史没拉进来：顶格给一个入口，
+      // 以前只能把正文滚到最顶触发，导航轨上够不着（作者在 PR #39 上报的第 4 条，勘 2026-11-26 补）。
+      html +=
+        '<button type="button" class="chat-rail-tick chat-rail-page chat-rail-older" data-page="older" aria-label="载入更早的历史"><i></i></button>';
     }
     for (let i = start; i < end; i += 1) {
       const t = this.railTurns[i];
@@ -680,14 +685,18 @@ class ConsoleApp {
     const size = this.railBatch || 48;
     // 翻页按整批走，批次不重叠：格子数和「一批」对得上，提示的区间就是点下去真正到的那一批（勘 2026-11-25）
     const from = Number.isFinite(this.railStart) ? this.railStart : Math.max(0, total - size);
+    if (dir === "older") {
+      this.railLoadOlder();
+      return;
+    }
     if (dir === "latest") {
       this.railPinned = true;
       this.railStart = Math.max(0, total - size);
       this.hideRailCard();
       // renderOutline 内部会调一次 syncRail，那时高亮还在末尾：保护要先挂上，否则当场被判成「滚回最新」。
-      this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + 3000 };
+      this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + RAIL_JUMP_MS };
       this.renderOutline();
-      this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + 3000 };
+      this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + RAIL_JUMP_MS };
       this.jumpToTurn(total - 1);
       return;
     }
@@ -699,14 +708,28 @@ class ConsoleApp {
     this.hideRailCard();
     // renderOutline 内部会调一次 syncRail，那一下高亮还在末尾：保护要先挂上，否则当场被判定成「滚回最新」，
     // 批次一路弹回末尾——点一次「更早」看着没反应（作者在 PR #39 上报的第 2 条，勘 2026-11-26 修）。
-    this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + 3000 };
+    this.railJump = { from: this.railStart, to: this.railStart + size, until: Date.now() + RAIL_JUMP_MS };
     this.renderOutline();
     // 翻完要落到那一批的头一格（往前）或末一格（往后），否则刻度换了、消息停在原处（勘 2026-11-25 修）。
     // 平滑滚动途中高亮仍在批外（甚至还在末尾），这段时间同样不许换批。
-    this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + 3000 };
+    this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || size), until: Date.now() + RAIL_JUMP_MS };
     this.jumpToTurn(
       dir === "prev" ? this.railStart : Math.min(total - 1, this.railStart + (this.railBatch || 48) - 1),
     );
+  }
+  /** 轨道顶格「载入更早」：往前拉一页历史，批次停在原处不跳（勘 2026-11-26）。 */
+  async railLoadOlder() {
+    const before = (this.railTurns || []).length;
+    const startBefore = Number.isFinite(this.railStart) ? this.railStart : 0;
+    await this.loadOlder();
+    const added = (this.railTurns || []).length - before;
+    // 没拉到（正在加载、或者已经没有更早的）就别动刻度
+    if (!added) return;
+    // 新轮全加在前面：原来的第 startBefore 轮现在是 startBefore + added
+    this.railPinned = false;
+    this.railStart = Math.max(0, Math.min(startBefore + added, (this.railTurns || []).length - 1));
+    this.railJump = { from: this.railStart, to: this.railStart + (this.railBatch || 48), until: Date.now() + RAIL_JUMP_MS };
+    this.renderOutline();
   }
   railCard() {
     let card = document.getElementById("chat-rail-card");
@@ -738,6 +761,10 @@ class ConsoleApp {
       meta =
         (prefix === null ? "共 " + total + " 轮（已加载）· 前面还有更早的" : "共 " + (prefix + total) + " 轮") +
         " · 点一下跳回最新的对话";
+    } else if (tick.dataset.page === "older") {
+      head = "载入更早的历史";
+      body = "点一下往前拉一页，刻度留在当前这一批";
+      meta = (prefix === null ? "共 " + total + " 轮（已加载）" : "共 " + (prefix + total) + " 轮") + " · 前面还有更早的";
     } else if (tick.dataset.page) {
       // 提示的是「点下去会落到哪一批」，和 railPage 的落点一致，不是拍脑袋的区间（勘 2026-11-25）
       const raw = tick.dataset.page === "prev" ? start - size : start + size;
@@ -792,6 +819,16 @@ class ConsoleApp {
       return;
     }
     target.scrollIntoView({ block: "start", behavior: "smooth" });
+    // 程序滚动的真正终点是 scrollend，到了就立刻撤保护，别让固定超时兜。
+    // 慢设备上平滑滚动可能拖过几秒，超时一过、高亮还在末尾，批次就被拽回最新（勘 2026-11-26 修）。
+    const box = $("messages");
+    if (box && typeof box.addEventListener === "function") {
+      const done = () => {
+        box.removeEventListener("scrollend", done);
+        this.railJump = null;
+      };
+      box.addEventListener("scrollend", done, { once: true, passive: true });
+    }
   }
   /** 滚动或窗口尺寸一变就重排：刻度按消息的真实位置摆，紫色只留一个（勘 2026-11-16）。
       旧版一边画按比例插值的游标、一边画按消息判定的高亮，两者位置不一致，
@@ -1617,6 +1654,8 @@ class ConsoleApp {
 const thinkingFaces = ["(｡•ᴗ•｡)","(´｡• ᵕ •｡`)","(๑•̀ㅂ•́)و","(￣▽￣)","(＝ω＝)","(っ˘ω˘ς)","(๑´ω`๑)","(・ω・)","(๑•́ ₃ •̀๑)","( ˘ω˘ )","(´▽`)","(･ω･)ﾉ"];
 const pickThinkingFace = () => thinkingFaces[Math.floor(Math.random() * thinkingFaces.length)];
 
+// 程序滚动的保护窗口。到期不等于滚动结束，只为没有 scrollend 的环境兜底（勘 2026-11-26）。
+const RAIL_JUMP_MS = 8000;
 const SESSION_PAGE = 40;
 
 /** 会话行 → 气泡数组；首屏与续页共用一份映射。 */
