@@ -487,6 +487,9 @@ class ConsoleApp {
     }
     localStorage.whaleSession = id;
     this.state.messages = messageRows(page.items, page.positions);
+    // 一次就拉到头（会话不足一页）时前面确实一轮都没有，轮号从 1 起；
+    // 还有更早的没拉，就先空着，等往前翻页时再数。（勘 2026-11-26）
+    this.railPrefix = page.start === 0 ? 0 : undefined;
     this.state.paging = {
       total: page.total,
       start: page.start,
@@ -594,7 +597,16 @@ class ConsoleApp {
     let turn = null;
     (this.state.messages || []).forEach((m, index) => {
       if (m.role === "user") {
-        turn = { from: index, ask: plainText(m.text), answers: [] };
+        // 中途补充（nudge）也挂在 user 上，但它是同一轮的补充，不是新的一问。
+        // 旧写法给它单开一节，原问题那节就变成「没有回答」。（勘 2026-11-26 修）
+        // 只有内存里刚发出去的那条带 nudge 标记；刷新后从服务端读回来的是普通 user 消息，
+        // 所以还要按位置判：上一轮已经开了、但还没有任何回答，这条就是补充，不是新的一问。
+        const isNudge = m.nudge || (turn && turn.answers.length === 0);
+        if (isNudge && turn) {
+          if (m.text) turn.nudges.push(plainText(m.text));
+          return;
+        }
+        turn = { from: index, ask: plainText(m.text), answers: [], nudges: [] };
         this.railTurns.push(turn);
         return;
       }
@@ -610,6 +622,8 @@ class ConsoleApp {
     }
     rail.hidden = false;
     const total = this.railTurns.length;
+    // 这一批前面还有多少轮：prefix 未知（首屏、前面没拉过）时不假装知道全会话轮号。
+    const prefix = Number.isFinite(this.railPrefix) ? this.railPrefix : null;
     const size = this.railBatchSize();
     this.railBatch = size;
     // 手动翻过页就用 railStart 定的那一批；只有「跟随最新」时才强制贴在末尾
@@ -629,7 +643,8 @@ class ConsoleApp {
     for (let i = start; i < end; i += 1) {
       const t = this.railTurns[i];
       html +=
-        '<button type="button" class="chat-rail-tick" data-turn="' + i +
+        '<button type="button" class="chat-rail-tick" data-turn="' + i + '" data-ordinal="' +
+        (prefix === null ? "" : prefix + i + 1) +
         '" aria-label="' + e(clip(t.ask, 40)) + '"><i></i></button>';
     }
     if (end < total) {
@@ -701,6 +716,8 @@ class ConsoleApp {
     const card = this.railCard();
     const total = (this.railTurns || []).length;
     const size = this.railBatch || 48;
+    // 这一批前面还有多少轮；未知时不假装是全会话轮号（勘 2026-11-26）
+    const prefix = Number.isFinite(this.railPrefix) ? this.railPrefix : null;
     const start = Number.isFinite(this.railStart) ? this.railStart : 0;
     let head = "";
     let body = "";
@@ -708,23 +725,36 @@ class ConsoleApp {
     if (tick.dataset.page === "latest") {
       // 倒数第一格固定是「最新的一轮」，不是「又一批」（勘 2026-11-25 修）
       head = "最新的一轮";
-      body = "第 " + total + " 轮";
-      meta = "共 " + total + " 轮 · 点一下跳回最新的对话";
+      body = "第 " + (prefix === null ? total : prefix + total) + " 轮";
+      meta =
+        (prefix === null ? "共 " + total + " 轮（已加载）· 前面还有更早的" : "共 " + (prefix + total) + " 轮") +
+        " · 点一下跳回最新的对话";
     } else if (tick.dataset.page) {
       // 提示的是「点下去会落到哪一批」，和 railPage 的落点一致，不是拍脑袋的区间（勘 2026-11-25）
       const raw = tick.dataset.page === "prev" ? start - size : start + size;
       const lo = Math.max(0, Math.min(raw, Math.max(0, total - size)));
       const hi = Math.min(total, lo + size);
       head = tick.dataset.page === "prev" ? "更早的一批" : "后面的一批";
-      body = "第 " + (lo + 1) + "–" + hi + " 轮";
-      meta = "共 " + total + " 轮 · 点一下换这一批";
+      body =
+        prefix === null
+          ? "已加载第 " + (lo + 1) + "–" + hi + " 轮"
+          : "第 " + (prefix + lo + 1) + "–" + (prefix + hi) + " 轮";
+      meta =
+        (prefix === null ? "共 " + total + " 轮（已加载）· 前面还有更早的" : "共 " + (prefix + total) + " 轮") +
+        " · 点一下换这一批";
     } else {
       const turn = (this.railTurns || [])[Number(tick.dataset.turn)];
       if (!turn) return;
       head = clip(turn.ask, 120);
-      const answer = turn.answers.join(" ");
+      const answer =
+        (turn.nudges && turn.nudges.length ? "补充：" + turn.nudges.join(" ") + " " : "") +
+        turn.answers.join(" ");
       body = clip(answer || "（这一节没有回答）", 260);
-      meta = 1 + turn.answers.length + " 条";
+      meta =
+        (prefix === null ? "" : prefix + Number(tick.dataset.turn) + 1 + " 轮 · ") +
+        1 +
+        turn.answers.length +
+        " 条";
     }
     card.innerHTML =
       "<b>" + e(head) + "</b>" +
@@ -1467,6 +1497,9 @@ class ConsoleApp {
       };
       const rows = messageRows(page.items, page.positions);
       if (!rows.length) return;
+      // 只有拉到顶（start 0）才敢说「前面没有更早的了」，这时已加载的轮序就是全会话轮序。
+      // 中间那几页只攒了个半截数，不能拿去显示成绝对轮号，宁可继续标「已加载」。（勘 2026-11-26 修）
+      this.railPrefix = page.start === 0 ? 0 : undefined;
       this.state.messages = rows.concat(this.state.messages);
       this.renderMessages({ anchor: "keep" });
       this.setScrollTop(box, box.scrollHeight - prevHeight + prevTop);
@@ -1567,6 +1600,11 @@ const pickThinkingFace = () => thinkingFaces[Math.floor(Math.random() * thinking
 const SESSION_PAGE = 40;
 
 /** 会话行 → 气泡数组；首屏与续页共用一份映射。 */
+/** 截短，超了就加省略号。（勘 2026-11-26 补：这一版漏了这个依赖，作者报 clip is not defined） */
+function clip(text, max) {
+  const flat = String(text || "").trim();
+  return flat.length > max ? flat.slice(0, max) + "…" : flat;
+}
 function messageRows(rows, positions) {
   return rows
     .filter((row) => row.type === "message")

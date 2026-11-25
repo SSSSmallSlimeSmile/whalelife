@@ -1,0 +1,269 @@
+// 导航轨分节与轮号的回归（作者在 PR #39 上挑的第 3、4 条）。
+// 1) 中途补充（nudge）是同一轮的补充，不能单独成节，也不能让原问题那节变成「没有回答」
+// 2) 轮号必须是全会话轮号；前面还没拉全时不假装知道，且不会因为加载更多而悄悄换号
+// 3) clip 这个依赖必须真的在文件里（作者报的 clip is not defined）
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const raw = fs.readFileSync(path.join(here, "..", "core", "ui", "app.js"), "utf8");
+
+function toScript(text: string) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const merged: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    let line = lines[i];
+    if (line.trim().startsWith("import ") && !line.trim().endsWith(";")) {
+      while (i + 1 < lines.length) {
+        i += 1;
+        line += " " + lines[i].trim();
+        if (lines[i].trim().endsWith(";")) break;
+      }
+    }
+    merged.push(line);
+  }
+  const out: string[] = [];
+  for (const line of merged) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("import ") && trimmed.endsWith(";")) {
+      const open = trimmed.indexOf("{");
+      const close = trimmed.indexOf("}");
+      if (open < 0 || close < open) continue;
+      const names = trimmed
+        .slice(open + 1, close)
+        .split(",")
+        .map((name: string) => name.trim().replace(/\s+as\s+/, ": "))
+        .filter(Boolean)
+        .join(", ");
+      out.push("const { " + names + " } = globalThis.__stubBag;");
+      continue;
+    }
+    if (trimmed === "const app = new ConsoleApp();") {
+      out.push("globalThis.__ConsoleApp = ConsoleApp;");
+      continue;
+    }
+    if (trimmed === "app.start();") continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+const patched = toScript(raw);
+
+class FakeNode {
+  dataset: Record<string, string> = {};
+  clientHeight = 0;
+  scrollHeight = 0;
+  scrollTop = 0;
+  offsetWidth = 0;
+  hidden = false;
+  innerHTML = "";
+  children: FakeNode[] = [];
+  classes = new Set<string>();
+  style: Record<string, string> = {};
+  classList = {
+    add: (name: string) => this.classes.add(name),
+    remove: (name: string) => this.classes.delete(name),
+    contains: (name: string) => this.classes.has(name),
+    toggle: () => undefined,
+  };
+  constructor(attrs: Partial<FakeNode> & { dataset?: Record<string, string> } = {}) {
+    Object.assign(this, attrs);
+  }
+  addEventListener() {}
+  removeEventListener() {}
+  appendChild() {}
+  getBoundingClientRect() {
+    return { top: 0, bottom: 20, left: 0, right: 20, width: 200, height: 60 };
+  }
+  querySelectorAll() {
+    return [];
+  }
+  querySelector() {
+    return null;
+  }
+}
+
+function makeApp(elements: Record<string, FakeNode>) {
+  const sandbox: Record<string, any> = {
+    document: {
+      getElementById: (id: string) => elements[id] || new FakeNode(),
+      createElement: () => new FakeNode(),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener() {},
+      visibilityState: "visible",
+      body: new FakeNode(),
+    },
+    localStorage: {
+      store: new Map<string, string>(),
+      getItem(key: string) {
+        return this.store.has(key) ? this.store.get(key) : null;
+      },
+      setItem(key: string, value: unknown) {
+        this.store.set(key, String(value));
+      },
+    },
+    window: {
+      addEventListener() {},
+      innerWidth: 1400,
+      innerHeight: 900,
+      matchMedia: () => ({ matches: false, addEventListener() {} }),
+    },
+    ResizeObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    setTimeout,
+    clearTimeout,
+    console,
+    URL,
+    URLSearchParams,
+    JSON,
+    Number,
+    location: { hash: "" },
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  sandbox.__stubBag = new Proxy(
+    {
+      // 转义要真做，不然断言里的文案全被吞掉
+      escapeHTML: (value: unknown) =>
+        String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch),
+    },
+    { get: (target: any, key: string) => (key in target ? target[key] : () => "") },
+  );
+  vm.runInContext(patched, sandbox, { filename: "app.js" });
+  const App = sandbox.__ConsoleApp;
+  assert.equal(typeof App, "function", "没拿到 ConsoleApp");
+  return new App();
+}
+
+function rail(elements: Record<string, FakeNode>) {
+  const app = makeApp({
+    messages: new FakeNode(),
+    "chat-rail": new FakeNode({ clientHeight: 500 }),
+    "chat-rail-card": new FakeNode(),
+    ...elements,
+  });
+  app.state.messages = [];
+  return app;
+}
+
+test("中途补充不单独成节，原问题那节也不会变成没有回答", () => {
+  const app = rail({});
+  app.state.messages = [
+    { role: "user", text: "帮我改一下那个函数" },
+    { role: "user", text: "改完顺便跑个测试", nudge: true },
+    { role: "assistant", text: "改好了，测试也过了" },
+    { role: "user", text: "好" },
+    { role: "assistant", text: "行" },
+    { role: "user", text: "再问一句" },
+    { role: "assistant", text: "嗯" },
+  ];
+  app.renderOutline();
+  assert.equal(app.railTurns.length, 3, "三条用户发言应当只切成三节，补充不再独占一节");
+  const first = app.railTurns[0];
+  assert.equal(first.ask, "帮我改一下那个函数");
+  assert.equal(first.nudges.length, 1, "补充只算一条");
+  assert.equal(first.nudges[0], "改完顺便跑个测试", "补充要挂在同一轮上");
+  assert.equal(first.answers.length, 1, "原问题那节要有回答");
+  assert.equal(first.answers[0], "改好了，测试也过了");
+  assert.equal(app.railTurns[2].ask, "再问一句", "后面的问题照旧各成一节");
+});
+
+test("clip 依赖真的在文件里，悬浮卡不会因此抛错", () => {
+  const app = rail({});
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  const tick = new FakeNode({ dataset: { turn: "0" } });
+  assert.doesNotThrow(() => app.showRailCard(tick));
+  const card = app.railCard();
+  assert.match(String(card.innerHTML), /问一/, "悬浮卡里应当是问的那一句，不是空白");
+});
+
+test("前面还没拉全时，编号不假装是全会话轮号", () => {
+  const app = rail({});
+  app.railPrefix = undefined;
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  const card = app.railCard();
+  const prevTick = new FakeNode({ dataset: { page: "prev" } });
+  app.showRailCard(prevTick);
+  assert.match(String(card.innerHTML), /已加载第/, "前缀未知时要说「已加载第…」");
+  assert.doesNotMatch(String(card.innerHTML), /共 3 轮 · 点一下换这一批/, "不能把已加载轮数说成总数");
+});
+
+test("拉到顶之后，轮号是全会话轮号，且加载更多不会把它改小", () => {
+  const app = rail({});
+  app.railPrefix = 5;
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  const card = app.railCard();
+  app.showRailCard(new FakeNode({ dataset: { turn: "0" } }));
+  assert.match(String(card.innerHTML), /6 轮/, "前缀 5 + 第 1 格 = 第 6 轮");
+  assert.doesNotMatch(String(card.innerHTML), /已加载第/, "前缀已知时不该再退成「已加载」");
+});
+
+test("刷新后读回来的补充没有 nudge 标记，按位置也要并回上一轮", () => {
+  const app = rail({});
+  // 服务端存下来的行只有 role/text，既没有 nudge 也没有 nudgeId
+  app.state.messages = [
+    { role: "user", text: "帮我看看这个报错" },
+    { role: "user", text: "顺便把日志也读一下" },
+    { role: "assistant", text: "报错是缓存没命中，日志我看过了" },
+    { role: "user", text: "好" },
+    { role: "assistant", text: "行" },
+    { role: "user", text: "再问一句" },
+    { role: "assistant", text: "嗯" },
+  ];
+  app.renderOutline();
+  assert.equal(app.railTurns.length, 3, "两条连着的用户消息是一问加一条补充，不是两问");
+  assert.equal(app.railTurns[0].ask, "帮我看看这个报错");
+  assert.equal(app.railTurns[0].nudges.length, 1);
+  assert.equal(app.railTurns[0].nudges[0], "顺便把日志也读一下");
+  assert.equal(app.railTurns[0].answers.length, 1, "原问题不能变成「没有回答」");
+});
+
+test("补充只会并进当前这一轮，不会串到下一轮", () => {
+  const app = rail({});
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "user", text: "补二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  assert.equal(app.railTurns.length, 3);
+  assert.equal(app.railTurns[0].nudges.length, 0, "第一轮不该拿到第二轮的补充");
+  assert.equal(app.railTurns[1].nudges.length, 1);
+  assert.equal(app.railTurns[1].answers[0], "答二");
+});
