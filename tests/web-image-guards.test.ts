@@ -1,7 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { temporaryDirectory } from "./temporary-directory.ts";
-import { mkdir, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Memory } from "../core/memory.ts";
 import { Sessions } from "../core/session.ts";
@@ -104,9 +104,9 @@ const png = Buffer.from(
 ).toString("base64");
 
 // 拉起一个能收发聊天消息的实例：channels.web 的行为由参数决定。
-const bootChat = async (t: TestContext, web: any) => {
+const bootChat = async (t: TestContext, web: any, testRoot?: string) => {
   const previous = process.cwd();
-  const root = await temporaryDirectory("whale-img-chat-");
+  const root = testRoot ?? await temporaryDirectory("whale-img-chat-");
   process.chdir(root);
   t.after(() => process.chdir(previous));
   const app = await startWeb({ web: { host: "127.0.0.1", port: 0 } }, { channels: { web }, logger: quiet }, {});
@@ -183,7 +183,7 @@ const personaFile = "image-test-persona\n";
 // 起一个真 Memory + 真 Sessions，只把 appendEvent / readSession 换成受控版本。
 // appendMode=throw-after-write 复现「JSONL 已追加、元数据写失败」；
 // readMode=throw 复现「回读本身失败」，值不是数组复现「读回来的东西没法判」。
-const bootSession = async (t: TestContext, options: { appendMode: "throw-after-write" | "throw-before-write"; readMode?: "ok" | "throw" | "not-array" }) => {
+const bootSession = async (t: TestContext, options: { appendMode: "throw-after-write" | "throw-before-write"; readMode?: "ok" | "throw" | "not-array" | "null-row" }) => {
   const root = await temporaryDirectory("whale-img-persist-");
   await writeFile(join(root, "p.md"), personaFile);
   const config = {
@@ -194,6 +194,7 @@ const bootSession = async (t: TestContext, options: { appendMode: "throw-after-w
   };
   const real = new Memory(join(root, "memory"), quiet);
   await real.init();
+  const indexError = Error("元数据写失败");
   let modelCalls = 0;
   // 只在 appendEvent 抛过之后才让 readSession 出故障：前面读历史那次必须正常，
   // 否则故障点跑到 appendEvent 之前，验的就不是回读这条路径了。
@@ -202,15 +203,20 @@ const bootSession = async (t: TestContext, options: { appendMode: "throw-after-w
     get(target, prop) {
       if (prop === "appendEvent") return async (row: any) => {
         if (options.appendMode === "throw-after-write") {
-          await target.appendEvent(row);          // 真的写进 JSONL
+          const episodes = join(target.sessionDir(row.session), "episodes");
+          await mkdir(episodes, { recursive: true });
+          const month = new Date().toISOString().slice(0, 7);
+          await appendFile(join(episodes, month + ".jsonl"), JSON.stringify(row) + "\n");
+          // 在正文追加和索引更新之间注入故障。
           persistFailed = true;
-          throw Error("元数据写失败");             // 随后的 index/session 写失败
+          throw indexError;
         }
         persistFailed = true;
         throw Error("JSONL 写失败");               // 一行都没写下去
       };
       if (prop === "readSession" && options.readMode && options.readMode !== "ok") return async (id: string) => {
         if (persistFailed && options.readMode === "throw") throw Error("读不出来");
+        if (persistFailed && options.readMode === "null-row") return [null];
         if (persistFailed) return { rows: [] };   // 非数组：判不清
         return target.readSession(id);
       };
@@ -227,7 +233,7 @@ const bootSession = async (t: TestContext, options: { appendMode: "throw-after-w
   const makeInput = () => new TurnInput({
     messageId: "m1", text: "看看这张", receivedAt: new Date().toISOString(), timezone: "Australia/Brisbane",
   }, signal);
-  return { real, sessions, route, makeInput, signal, modelCalls: () => modelCalls };
+  return { root, real, sessions, route, makeInput, signal, indexError, modelCalls: () => modelCalls };
 };
 
 const sendWithImage = (booted: any, input: any) => booted.sessions.chat(
@@ -245,6 +251,32 @@ test("JSONL 已追加、元数据写失败：回读得到那行，图必须留�
   assert.ok(rows.some((row: any) => row.text === "看看这张"), "这条测试的前提是 JSONL 真的写进去了");
 });
 
+test("reopening the session after an index write failure can read the referenced image", async t => {
+  const fixture = await bootSession(t, { appendMode: "throw-after-write" });
+  const web = async (id: string, text: string, chunk: any, context: any, persona: string, images: any, input: TurnInput) => {
+    try {
+      await fixture.sessions.chat(id, text, chunk, context, persona, fixture.route, false, undefined, images, input);
+    } catch (error) {
+      assert.equal(error, fixture.indexError);
+      throw error;
+    }
+  };
+  const { root, chat } = await bootChat(t, web, fixture.root);
+  const reply = await chat({ session: "s1", text: "看看这张", images: [{ mimeType: "image/png", data: png }] });
+  assert.equal(reply.type, "error");
+  assert.match(reply.error, /元数据写失败/);
+  assert.equal(fixture.modelCalls(), 0);
+  await fixture.sessions.close();
+
+  const reopened = new Memory(join(root, "memory"), quiet);
+  await reopened.init();
+  const row = (await reopened.readSession("s1")).find(row => row.role === "user");
+  assert.ok(row);
+  const marker = /^看看这张\n\[\[img:(memory\/uploads\/s1\/[^/\\\]]+)\]\]$/.exec(row.text);
+  assert.ok(marker, "the reopened message must contain its saved upload path");
+  assert.deepEqual(await readFile(join(root, marker[1])), Buffer.from(png, "base64"));
+});
+
 test("落库失败且回读不了：判不清一律保留图", async t => {
   const booted = await bootSession(t, { appendMode: "throw-after-write", readMode: "throw" });
   const input = booted.makeInput();
@@ -257,6 +289,13 @@ test("回读给回非数组：不能靠 rows.some 再抛一次，图照样保留
   const input = booted.makeInput();
   await assert.rejects(() => sendWithImage(booted, input), /元数据写失败/);
   assert.equal(input.uploadsKept, true, "回读结果不可解析时按已落库处理");
+});
+
+test("回读只返回 null 行：判不清，保留图并上报原始错误", async t => {
+  const booted = await bootSession(t, { appendMode: "throw-after-write", readMode: "null-row" });
+  const input = booted.makeInput();
+  await assert.rejects(() => sendWithImage(booted, input), error => error === booted.indexError);
+  assert.equal(input.uploadsKept, true);
 });
 
 test("确认没落库：不置保护标记，图可以回收", async t => {

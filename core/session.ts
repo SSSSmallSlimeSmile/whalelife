@@ -479,7 +479,9 @@ export class Sessions {
             let verdict: "kept" | "absent" | "unknown" = "unknown";
             try {
               const rows = await memory.readSession(id);
-              if (Array.isArray(rows)) verdict = rows.some((row: any) => row && row.id === userEventId) ? "kept" : "absent";
+              if (Array.isArray(rows) && rows.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+                verdict = rows.some((row) => row.id === userEventId) ? "kept" : "absent";
+              }
             } catch { verdict = "unknown"; }
             if (verdict !== "absent") input?.protectUploads();
           throw error;
