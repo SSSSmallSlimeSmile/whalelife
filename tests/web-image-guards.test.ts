@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { temporaryDirectory } from "./temporary-directory.ts";
 import { mkdir, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Memory } from "../core/memory.ts";
+import { Sessions } from "../core/session.ts";
+import { TurnInput } from "../core/turn-input.ts";
 import { startWeb } from "../core/web.ts";
 import WebSocket from "ws";
 
@@ -152,18 +155,6 @@ test("模型失败但用户消息已落库：图必须留着，历史里的标�
   assert.deepEqual(files.length, 1, "已经落库的图不能被擦");
 });
 
-test("落库结果不明：图必须留着，宁可留孤儿也不能断链", async t => {
-  const web = async (_id: string, _text: string, _chunk: any, _ctx: any, _persona: any, _images: any, input: any) => {
-    // 模拟「JSONL 已追加、元数据写入失败」：调用方拿不到确定结论。
-    input.protectUploads();
-    throw Error("元数据写失败");
-  };
-  const { chat, uploads } = await bootChat(t, web);
-  const reply = await chat({ session: "s4", text: "看看这张", images: [{ mimeType: "image/png", data: png }] });
-  assert.equal(reply.type, "error");
-  const files = await uploads("s4");
-  assert.deepEqual(files.length, 1, "落库不确定时删图会把历史里的 [[img:]] 变成断链");
-});
 
 test("通道报错且用户消息没落库：图要擦掉，不留孤儿", async t => {
   const web = async () => { throw Error("会话被切走了"); };
@@ -183,4 +174,96 @@ test("正文超长在建轮时就抛：图同样要被回收", async t => {
   assert.equal(web.mock.callCount(), 0);
   const files = await uploads("s3");
   assert.deepEqual(files.length, 0, "建轮就失败时图不能留在盘上");
+});
+
+// ---- 落库失败的真实链路：真的调 Sessions.chat，让 appendEvent 在元数据写失败时抛 ----
+
+const personaFile = "image-test-persona\n";
+
+// 起一个真 Memory + 真 Sessions，只把 appendEvent / readSession 换成受控版本。
+// appendMode=throw-after-write 复现「JSONL 已追加、元数据写失败」；
+// readMode=throw 复现「回读本身失败」，值不是数组复现「读回来的东西没法判」。
+const bootSession = async (t: TestContext, options: { appendMode: "throw-after-write" | "throw-before-write"; readMode?: "ok" | "throw" | "not-array" }) => {
+  const root = await temporaryDirectory("whale-img-persist-");
+  await writeFile(join(root, "p.md"), personaFile);
+  const config = {
+    providers: [{ id: "model", model: "chat", base_url: "https://unused.invalid", context_window: 32000 }],
+    personas: { p: { name: "P", file: "p.md", provider: "model", permission: "full" } },
+    channels: { web: { persona: "p", permission: "full" } },
+    memory: { include_summary: false },
+  };
+  const real = new Memory(join(root, "memory"), quiet);
+  await real.init();
+  let modelCalls = 0;
+  // 只在 appendEvent 抛过之后才让 readSession 出故障：前面读历史那次必须正常，
+  // 否则故障点跑到 appendEvent 之前，验的就不是回读这条路径了。
+  let persistFailed = false;
+  const flaky = new Proxy(real, {
+    get(target, prop) {
+      if (prop === "appendEvent") return async (row: any) => {
+        if (options.appendMode === "throw-after-write") {
+          await target.appendEvent(row);          // 真的写进 JSONL
+          persistFailed = true;
+          throw Error("元数据写失败");             // 随后的 index/session 写失败
+        }
+        persistFailed = true;
+        throw Error("JSONL 写失败");               // 一行都没写下去
+      };
+      if (prop === "readSession" && options.readMode && options.readMode !== "ok") return async (id: string) => {
+        if (persistFailed && options.readMode === "throw") throw Error("读不出来");
+        if (persistFailed) return { rows: [] };   // 非数组：判不清
+        return target.readSession(id);
+      };
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const llm = { chat: async () => { modelCalls++; return { text: "不该走到模型", toolCalls: [] }; } };
+  const tools = { list: () => [], call: async () => ({ ok: true }), multimodal: () => undefined };
+  const sessions = new Sessions(root, config, { memory: flaky, llm, tools, logger: quiet });
+  t.after(() => sessions.close());
+  const route = { channel: "web", account: "local", peer: "s1", persona: "p", permission: "full" } as any;
+  const signal = new AbortController().signal;
+  const makeInput = () => new TurnInput({
+    messageId: "m1", text: "看看这张", receivedAt: new Date().toISOString(), timezone: "Australia/Brisbane",
+  }, signal);
+  return { real, sessions, route, makeInput, signal, modelCalls: () => modelCalls };
+};
+
+const sendWithImage = (booted: any, input: any) => booted.sessions.chat(
+  "s1", "看看这张", () => {}, undefined, "p", booted.route, false, undefined,
+  [{ mimeType: "image/png", data: Buffer.from(png, "base64") }], input,
+);
+
+test("JSONL 已追加、元数据写失败：回读得到那行，图必须留着", async t => {
+  const booted = await bootSession(t, { appendMode: "throw-after-write" });
+  const input = booted.makeInput();
+  await assert.rejects(() => sendWithImage(booted, input), /元数据写失败/);
+  assert.equal(input.uploadsKept, true, "历史里已经有 [[img:]]，不能擦图");
+  assert.equal(booted.modelCalls(), 0, "落库失败就不该走到模型");
+  const rows = await booted.real.readSession("s1");
+  assert.ok(rows.some((row: any) => row.text === "看看这张"), "这条测试的前提是 JSONL 真的写进去了");
+});
+
+test("落库失败且回读不了：判不清一律保留图", async t => {
+  const booted = await bootSession(t, { appendMode: "throw-after-write", readMode: "throw" });
+  const input = booted.makeInput();
+  await assert.rejects(() => sendWithImage(booted, input), /元数据写失败/);
+  assert.equal(input.uploadsKept, true, "读不清不等于没写进去");
+});
+
+test("回读给回非数组：不能靠 rows.some 再抛一次，图照样保留", async t => {
+  const booted = await bootSession(t, { appendMode: "throw-after-write", readMode: "not-array" });
+  const input = booted.makeInput();
+  await assert.rejects(() => sendWithImage(booted, input), /元数据写失败/);
+  assert.equal(input.uploadsKept, true, "回读结果不可解析时按已落库处理");
+});
+
+test("确认没落库：不置保护标记，图可以回收", async t => {
+  const booted = await bootSession(t, { appendMode: "throw-before-write" });
+  const input = booted.makeInput();
+  await assert.rejects(() => sendWithImage(booted, input), /JSONL 写失败/);
+  assert.equal(input.uploadsKept, false, "一条都没写下去时不该留孤儿");
+  const rows = await booted.real.readSession("s1");
+  assert.equal(rows.length, 0);
 });

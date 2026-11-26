@@ -474,8 +474,14 @@ export class Sessions {
           // 落库之后再失败，历史里那行 [[img:]] 还指着图，外面不许擦。
           input?.markPersisted(input.messageId);
         } catch (error) {
-          const rows = await memory.readSession(id).catch(() => null);
-          if (!rows || rows.some((row: any) => row.id === userEventId)) input?.protectUploads();
+            // 回读本身也可能抛、可能给回非数组、行里可能带 null。判不清一律按「可能已落库」处理：
+            // 宁可留下没人引用的孤儿图，也不能让历史里那行 [[img:]] 指向不存在的文件。
+            let verdict: "kept" | "absent" | "unknown" = "unknown";
+            try {
+              const rows = await memory.readSession(id);
+              if (Array.isArray(rows)) verdict = rows.some((row: any) => row && row.id === userEventId) ? "kept" : "absent";
+            } catch { verdict = "unknown"; }
+            if (verdict !== "absent") input?.protectUploads();
           throw error;
         }
       }
