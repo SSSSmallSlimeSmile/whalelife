@@ -709,3 +709,65 @@ test("已经在拉更早历史时，再点一次「载入更早」不会重复�
   await app.railLoadOlder();
   assert.equal(calls, 1, "没在拉的时候正常发起");
 });
+
+test("悬浮卡的「N 条」按消息数算，不会拼成 11 条", () => {
+  // 旧写法是 (前缀文案) + 1 + turn.answers.length：前缀未知时第一项是空串，
+  // "" + 1 得到 "1"，再 + 1 就成了 "11 条"。作者在 PR #39 上报的第 1 条。（勘 2026-11-26）
+  const app = rail({});
+  app.railPrefix = undefined;
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  const card = app.railCard();
+  app.showRailCard(new FakeNode({ dataset: { turn: "0" } }));
+  assert.match(String(card.innerHTML), /2 条/, "一问一答是 2 条");
+  assert.doesNotMatch(String(card.innerHTML), /11 条/, "不能把 1 和答案数拼成 11");
+
+  // 中途补充也算这一轮的消息：提问 1 + 补充 1 + 回答 1
+  app.state.messages = [
+    { role: "user", text: "问一" },
+    { role: "user", text: "补充一句", nudge: true },
+    { role: "assistant", text: "答一" },
+    { role: "user", text: "问二" },
+    { role: "assistant", text: "答二" },
+    { role: "user", text: "问三" },
+    { role: "assistant", text: "答三" },
+  ];
+  app.renderOutline();
+  app.showRailCard(new FakeNode({ dataset: { turn: "0" } }));
+  assert.match(String(card.innerHTML), /3 条/, "加一句补充是 3 条");
+});
+
+test("整页都是助手主动消息、但还有更早历史时，轨道仍留着「载入更早」", async () => {
+  // railTurns 为空时旧写法连整条轨一起藏，把唯一的入口也藏了。作者在 PR #39 上报的第 2 条。（勘 2026-11-26）
+  const railEl = railWithTicks();
+  const app = rail({ "chat-rail": railEl });
+  app.state.messages = [
+    { role: "assistant", text: "提醒一" },
+    { role: "assistant", text: "提醒二" },
+  ];
+  app.state.paging = { total: 240, start: 200, end: 240, hasMore: true };
+  app.renderOutline();
+  assert.notEqual(railEl.hidden, true, "还有更早历史，不能整条藏掉");
+  assert.equal(ticksOf(railEl).filter((t) => t.dataset.turn !== undefined).length, 0, "这一页确实没有用户轮次");
+  const older = ticksOf(railEl).find((t) => t.dataset.page === "older");
+  assert.ok(older?.onclick, "要留下「载入更早」这一格");
+
+  let calls = 0;
+  app.loadOlder = async () => {
+    calls += 1;
+  };
+  older.onclick();
+  assert.equal(calls, 1, "点了要真去拉，不能是死按钮");
+
+  // 真没有更早历史了，这时才收起来
+  app.state.paging = { total: 40, start: 0, end: 40, hasMore: false };
+  app.renderOutline();
+  assert.equal(railEl.hidden, true, "hasMore 为假时才藏");
+});

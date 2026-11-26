@@ -613,7 +613,10 @@ class ConsoleApp {
       }
       if (turn && m.text) turn.answers.push(plainText(m.text));
     });
-    if (this.railTurns.length < 3 && !(this.railTurns.length && this.state.paging?.hasMore)) {
+    // 前面还有更早历史时，哪怕这一页一条用户轮次都没有（全是助手主动消息），也不能藏整条轨：
+    // 藏了就等于把「载入更早」唯一的入口也藏了（作者在 PR #39 上报，勘 2026-11-26 修）。
+    const hasOlder = !!(this.state.paging && this.state.paging.hasMore);
+    if (this.railTurns.length < 3 && !hasOlder) {
       rail.hidden = true;
       rail.innerHTML = "";
       this.railStart = null;
@@ -680,15 +683,17 @@ class ConsoleApp {
   }
   /** 翻页：只换这一批刻度，不动消息区（勘 2026-11-25）。 */
   railPage(dir) {
+    // 「载入更早」与这一批有没有轮次无关：整页都是助手主动消息时 railTurns 为空，
+    // 下面的早退会把唯一的入口变成死按钮（作者在 PR #39 上报，勘 2026-11-26 修）。
+    if (dir === "older") {
+      this.railLoadOlder();
+      return;
+    }
     const total = (this.railTurns || []).length;
     if (!total) return;
     const size = this.railBatch || 48;
     // 翻页按整批走，批次不重叠：格子数和「一批」对得上，提示的区间就是点下去真正到的那一批（勘 2026-11-25）
     const from = Number.isFinite(this.railStart) ? this.railStart : Math.max(0, total - size);
-    if (dir === "older") {
-      this.railLoadOlder();
-      return;
-    }
     if (dir === "latest") {
       this.railPinned = true;
       this.railStart = Math.max(0, total - size);
@@ -790,11 +795,12 @@ class ConsoleApp {
         (turn.nudges && turn.nudges.length ? "补充：" + turn.nudges.join(" ") + " " : "") +
         turn.answers.join(" ");
       body = clip(answer || "（这一节没有回答）", 260);
+      // 先算条数再拼文案。旧写法第一项在前缀未知时是空串，"" + 1 得到 "1"，
+      // 再 + 答案数就拼成 "11 条"——一问一答会显示成 11 条（作者在 PR #39 上报，勘 2026-11-26 修）。
+      // 条数按这一轮的消息总数算：提问 1 + 补充 + 回答。
+      const count = 1 + (turn.nudges ? turn.nudges.length : 0) + turn.answers.length;
       meta =
-        (prefix === null ? "" : prefix + Number(tick.dataset.turn) + 1 + " 轮 · ") +
-        1 +
-        turn.answers.length +
-        " 条";
+        (prefix === null ? "" : prefix + Number(tick.dataset.turn) + 1 + " 轮 · ") + count + " 条";
     }
     card.innerHTML =
       "<b>" + e(head) + "</b>" +
